@@ -677,6 +677,30 @@ enum CaptureSelfTest {
         check("Escape can be re-claimed for the next recording", reclaimed)
         GlobalHotKeyMonitor.shared.unregister(.recordingCancel)
 
+        // The countdown claims Escape, then the recording rebinds it in place. Re-registering the
+        // same combination would fail with eventHotKeyExistsErr, so the hand-off must not do that.
+        var handoffCancels = 0
+        let handoffClaim = TransientHotKeyClaim(
+            combo: .bareEscape,
+            register: { combo, action in
+                GlobalHotKeyMonitor.shared.register(
+                    combo, in: .recordingCancel, allowingNoModifiers: true, action: action
+                )
+            },
+            unregister: { GlobalHotKeyMonitor.shared.unregister(.recordingCancel) }
+        )
+        check("countdown claims Escape", handoffClaim.claim { handoffCancels += 1 })
+        check("recording rebinds the same claim without re-registering",
+              handoffClaim.claim { handoffCancels += 2 } && handoffClaim.registrationCount == 1,
+              detail: "registrations=\(handoffClaim.registrationCount)")
+        check("the claim is still live across the hand-off",
+              GlobalHotKeyMonitor.shared.isRegistered(.recordingCancel))
+        handoffClaim.release()
+        handoffClaim.release()
+        check("release is idempotent and gives the key back",
+              handoffClaim.releaseCount == 1 && !GlobalHotKeyMonitor.shared.isRegistered(.recordingCancel),
+              detail: "releases=\(handoffClaim.releaseCount)")
+
         check("a modifier-less combination is refused for the configurable shortcut",
               !GlobalHotKeyMonitor.shared.register(.bareEscape, in: .primaryCapture) {})
         // That refusal left the primary slot empty; restore it so the app-level invariant holds.

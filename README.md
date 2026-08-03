@@ -12,8 +12,9 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 - **Global shortcut** (default `⌥⇧5`) opens a full-screen region picker across every display.
 - In the picker: drag to capture a **screenshot**, press **R** to switch to **recording** mode
   (**S** switches back), **Esc** cancels.
-- While a recording runs, **Esc** cancels it from anywhere — TriCap claims a system-wide Escape
-  for the duration of the recording only, and releases it as soon as the recording ends.
+- **Esc** cancels from anywhere, throughout the countdown *and* the recording — TriCap claims a
+  system-wide Escape for that span only and releases it the moment the recording ends. The HUD's
+  **Stop** button is a click; there is no global stop key.
 - Recording gets an optional **countdown**, a floating **stop** control with live elapsed time and
   frame count, and **head/tail trimming** in the editor.
 - **Annotate** with arrow, rectangle, text, freehand pen and mosaic — with undo/redo. For a clip
@@ -132,7 +133,8 @@ identity to avoid that. This repository does not sign, notarize or publish.
 1. Press `⌥⇧5` (or pick **Capture Region…** / **Record Region…** from the menu).
 2. Drag out a region. The readout shows the exact pixel size. `R`/`S` toggle screenshot vs
    recording; `Esc` cancels.
-3. For a recording: the countdown runs, then record; click **Stop** (or `Esc` to abandon).
+3. For a recording: the countdown runs, then record. Click **Stop** to finish, or press `Esc` —
+   from any app — to abandon it, during the countdown or during the recording.
 4. Annotate. `⌘Z` / `⇧⌘Z` undo and redo. For a clip, drag the **Start**/**End** handles to trim
    and the **Frame** handle to scrub.
 5. **Save**. The file lands in your save folder and the reference goes to the clipboard.
@@ -157,13 +159,19 @@ Most people should pick a preset and never look further:
 | Smaller file | 65 | 960 px | 10 fps | 60 |
 | **Balanced** (default) | 85 | 1440 px | 12 fps | 80 |
 | Sharper | 95 | 1920 px | 15 fps | 90 |
-| Maximum | 100 | 3840 px | 20 fps | 95 |
+| Up to 4K | 100 | 3840 px | 20 fps | 95 |
 
 Every number is a real encoder argument, not a label — `QualityPresetTests` asserts the mapping.
 
-**What actually drives file size**, in order: resolution, then frame rate, then the quality
-factor. Halving the longest edge cuts a recording to roughly a quarter of its size; dropping the
-quality factor a few points is barely visible either way.
+*Up to 4K* is a ceiling, not "original size": it caps the long edge at 3840 px, which is still a
+downscale on a larger display, and it deliberately stops short of the 30 fps and quality-100
+ceilings — those multiply what a recording holds in memory for a difference few people would see.
+
+**What drives file size.** For a recording, resolution and frame rate usually matter more than the
+quality factor: fewer pixels and fewer frames means less to encode at all, while the quality factor
+only changes how hard each frame is squeezed. How much more depends entirely on what is on screen
+— a mostly-still window behaves very differently from playing video — so TriCap does not quote a
+ratio it has not measured.
 
 **PNG has no quality setting** and TriCap does not pretend otherwise. PNG is lossless: the encoder
 takes no quality argument, so the Advanced section shows *Lossless — no setting* for PNG and a

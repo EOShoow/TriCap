@@ -74,7 +74,7 @@ Raised by Codex against `83a8c12`, then independently re-reviewed against `f521a
 | P0-4 | The menu bar was identical whether or not TriCap could actually capture | `AppDelegate.buildMenu` shows permission state, a fix action, and *Capture in progress…* | manual (§4) |
 | P0-5 | The overlay's mode hint vanished on mouse-down and never said what release would do | Persistent mode banner, corner brackets, *Release to capture* / *Release to start recording* | snapshots 04, 11 |
 | P1-6 | Quality was raw encoder parameters with no result-oriented choice | [QualityPreset.swift](Sources/TriCapKit/QualityPreset.swift) — four presets, Custom as a state, plain-language size guidance | *Quality presets* (6), *Quality preset ↔ encoder parameters* (6), *Settings migration* (5) |
-| P1-7 | The recording HUD had no cancel affordance and no sense of the limit | Progress bar toward `maxDuration`, `Esc cancels · Return stops`, countdown caption | snapshots 05, 12 |
+| P1-7 | The recording HUD had no cancel affordance and no sense of the limit | Progress bar toward `maxDuration`, an explicit cancel/stop line, countdown caption (the wording was corrected in round 4 — see below) | snapshots 05, 12 |
 | P1-8 | Tool glyphs were unlabelled with no shortcuts | Named active tool, `⌘1`–`⌘5`, purpose-first tooltips | *Annotation tool affordances* (3) · snapshots 02, 03 |
 | P1-9 | Settings mixed limits with quality and always showed every parameter | Four tabs; Quality gets preset → format → advanced | snapshots 01, 08 |
 | P1-10 | The editor never showed where the file would go | `Saves to …` line, plus **Show in Finder** after saving | snapshots 02, 03 |
@@ -83,6 +83,21 @@ Also fixed while testing the migration: `RecordingLimits` and `AnimatedWebPOptio
 straight into their stored properties, bypassing their own clamping initializers, so a corrupt or
 future settings blob could load a 999 fps / 99999 px configuration. Both now decode through the
 clamping initializer (*Settings migration* → "An out-of-range legacy value is clamped").
+
+## Round 4 — Codex acceptance fixes
+
+| # | Finding | Fix | Verified by |
+|---|---|---|---|
+| 1 | `SettingsStore`'s nested normalising write made `onChange` report `proposal → normalised`, so an edit to legacy settings that also relabelled the preset hid the hot-key change and the shortcut was never re-registered | `AppSettings.resolveUpdate` pairs the normalised value with the *real* previous one; the store suppresses its own re-entrant `didSet` — one normalisation, one persist, one notification | *Settings update resolution* (7), incl. "legacy matching preset + first hot-key edit" |
+| 2 | The HUD promised "Return stops", but it is a borderless never-key panel and no global Return was ever registered | Wording is now `Esc cancels · Click Stop to finish`; the unreachable `keyEquivalent` is removed | snapshot 05 |
+| 3 | The countdown claimed Esc worked from other apps but used a *local* `NSEvent` monitor; the global key was only claimed once recording began | `TransientHotKeyClaim` is claimed before the first tick and rebound — not re-registered — when the recording takes over; released on every exit path | *Transient hot key claim* (10) · selftest hand-off checks |
+| 4 | `ExportSummary.detailDescription` was computed and tested but never rendered | The toast shows it for stills and clips; the panel is sized from its content so a wrapping warning is not clipped | *Export summary wording* (+3) · snapshots 10, 13 |
+| 5 | `.maximum` promised "no downscaling / highest quality" while capping at 3840 px / 20 fps / 95; WebP and file-size copy stated unmeasured figures; `hasSeenWelcome` comment was inverted | Renamed *Up to 4K* with a summary quoting the real cap; format and size copy made conditional; comment corrected | *Quality presets* (+2, incl. a test that fails on any digit in format copy) |
+
+Also fixed while renaming the preset: an unrecognised enum raw value made `decodeIfPresent`
+**throw**, and `SettingsStore` reads settings with `try?` — so one renamed case would have silently
+discarded the user's entire settings blob. Enum fields now decode tolerantly
+(*Settings migration* → unknown preset / unknown format).
 
 ## Deliverables
 

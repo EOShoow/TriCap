@@ -161,6 +161,36 @@ public struct AppSettings: Codable, Equatable, Sendable {
         return copy
     }
 
+    /// The result of one settings edit: what should be stored, and what an observer must be told.
+    public struct Update: Equatable, Sendable {
+        /// The values as they were before the edit.
+        public let previous: AppSettings
+        /// The values to store — the proposal after quality-preset normalisation.
+        public let current: AppSettings
+        /// `false` when normalisation collapsed the edit back to where it started.
+        public var isEffective: Bool { previous != current }
+
+        public init(previous: AppSettings, current: AppSettings) {
+            self.previous = previous
+            self.current = current
+        }
+    }
+
+    /// Normalise a proposed edit and pair it with the values it actually replaces.
+    ///
+    /// This exists because normalisation must not be observable as a second edit. A store that
+    /// reacts to its own normalising write reports `proposal → normalised` and loses the original
+    /// `previous`, which silently swallows anything else the same edit changed.
+    ///
+    /// The case that broke: settings loaded from a build without presets carry
+    /// ``QualityPreset/custom`` even when their values happen to match a preset exactly. The very
+    /// first edit — say, only the hot key — therefore also triggers a relabel to that preset. If
+    /// the observer is handed `proposal → normalised`, both sides already have the new hot key, so
+    /// "did the hot key change?" answers *no* and the shortcut is never re-registered.
+    public static func resolveUpdate(previous: AppSettings, proposed: AppSettings) -> Update {
+        Update(previous: previous, current: proposed.reconciledForQualityPreset())
+    }
+
     /// Recompute ``qualityPreset`` from the current values. Cheap; safe to call after any edit.
     public mutating func reconcileQualityPreset() {
         qualityPreset = QualityPreset.matching(qualityValues)
@@ -179,8 +209,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .hotKey) ?? fallback.hotKey
         saveDirectoryPath = try c.decodeIfPresent(String.self, forKey: .saveDirectoryPath) ?? fallback.saveDirectoryPath
         markdownVaultRootPath = try c.decodeIfPresent(String.self, forKey: .markdownVaultRootPath)
-        markdownLinkStyle = try c.decodeIfPresent(MarkdownLinkStyle.self, forKey: .markdownLinkStyle) ?? fallback.markdownLinkStyle
-        stillFormat = try c.decodeIfPresent(OutputFormat.self, forKey: .stillFormat) ?? fallback.stillFormat
+        markdownLinkStyle = c.decodeTolerantly(MarkdownLinkStyle.self, forKey: .markdownLinkStyle) ?? fallback.markdownLinkStyle
+        stillFormat = c.decodeTolerantly(OutputFormat.self, forKey: .stillFormat) ?? fallback.stillFormat
         stillQuality = (try c.decodeIfPresent(Int.self, forKey: .stillQuality) ?? fallback.stillQuality).clamped(to: 0...100)
         recordingLimits = try c.decodeIfPresent(RecordingLimits.self, forKey: .recordingLimits) ?? fallback.recordingLimits
         animatedWebPOptions = try c.decodeIfPresent(AnimatedWebPOptions.self, forKey: .animatedWebPOptions) ?? fallback.animatedWebPOptions
@@ -189,11 +219,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         // a preset — which would rewrite whatever quality the user had been getting — the stored
         // values decide: they map to a preset only if they match one exactly, and otherwise the
         // settings load as `.custom` with every number preserved.
-        if let stored = try c.decodeIfPresent(QualityPreset.self, forKey: .qualityPreset) {
-            qualityPreset = stored
-        } else {
-            qualityPreset = .custom
-        }
+        // An unrecognised value — a preset renamed since the blob was written, or one from a
+        // newer build — falls back to `.custom`, which keeps every stored number. Decoding it
+        // strictly would throw, and the caller's `try?` would then discard the *entire* settings
+        // blob over one unknown string.
+        qualityPreset = c.decodeTolerantly(QualityPreset.self, forKey: .qualityPreset) ?? .custom
         countdownSeconds = (try c.decodeIfPresent(Int.self, forKey: .countdownSeconds) ?? fallback.countdownSeconds).clamped(to: Self.countdownRange)
         copyReferenceAfterExport = try c.decodeIfPresent(Bool.self, forKey: .copyReferenceAfterExport) ?? fallback.copyReferenceAfterExport
         copyImageAfterExport = try c.decodeIfPresent(Bool.self, forKey: .copyImageAfterExport) ?? fallback.copyImageAfterExport

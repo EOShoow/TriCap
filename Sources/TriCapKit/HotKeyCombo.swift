@@ -46,6 +46,14 @@ public struct HotKeyCombo: Codable, Equatable, Hashable, Sendable {
         return s
     }
 
+    /// A bare Escape, used only as the transient recording-cancel key.
+    ///
+    /// ``isValid`` is deliberately `false` for this combination — it must never be selectable as
+    /// the persistent capture shortcut, because a modifier-less hot key swallows ordinary typing
+    /// system-wide. Claiming it therefore requires an explicit opt-in, and it is held only for the
+    /// length of one countdown-plus-recording. See `TransientHotKeyClaim`.
+    public static let bareEscape = HotKeyCombo(keyCode: 53, carbonModifiers: 0)
+
     /// TriCap's default: Option+Shift+5, chosen to sit next to the system ⇧⌘5 without colliding.
     public static let `default` = HotKeyCombo(
         keyCode: 23,  // kVK_ANSI_5

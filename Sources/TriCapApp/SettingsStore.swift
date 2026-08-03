@@ -19,21 +19,32 @@ public final class SettingsStore: ObservableObject {
 
     @Published public var settings: AppSettings {
         didSet {
-            guard settings != oldValue else { return }
+            // The normalising write below re-enters this observer. Ignoring that pass is what
+            // keeps one user edit to exactly one persist and one notification carrying the real
+            // before/after values — see `AppSettings.resolveUpdate`.
+            guard !isNormalizing else { return }
+
             // Any edit to an advanced encoder value re-derives the preset label, so a hand-tuned
             // setting reads as Custom immediately instead of continuing to claim a preset it no
             // longer matches.
-            let reconciled = settings.reconciledForQualityPreset()
-            if reconciled != settings {
-                settings = reconciled  // re-enters once; the guard above stops it there
-                return
+            let update = AppSettings.resolveUpdate(previous: oldValue, proposed: settings)
+            guard update.isEffective else { return }
+
+            if update.current != settings {
+                isNormalizing = true
+                settings = update.current
+                isNormalizing = false
             }
+
             persist()
-            onChange?(oldValue, settings)
+            onChange?(update.previous, update.current)
         }
     }
 
-    /// `true` until the user has been shown the welcome window once.
+    /// Set while the store rewrites `settings` with its own normalised value.
+    private var isNormalizing = false
+
+    /// `false` until the welcome window has been shown once, `true` afterwards.
     public var hasSeenWelcome: Bool {
         get { defaults.bool(forKey: Self.welcomeShownKey) }
         set { defaults.set(newValue, forKey: Self.welcomeShownKey) }

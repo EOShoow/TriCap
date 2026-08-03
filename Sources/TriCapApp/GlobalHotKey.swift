@@ -146,13 +146,6 @@ private let hotKeyCarbonHandler: EventHandlerUPP = { _, event, _ in
 }
 
 extension HotKeyCombo {
-    /// A bare Escape, used only as the transient recording-cancel key.
-    ///
-    /// `isValid` is deliberately `false` for this combination — it must never be selectable as the
-    /// persistent capture shortcut — so registering it requires the explicit
-    /// `allowingNoModifiers` opt-in.
-    public static let bareEscape = HotKeyCombo(keyCode: 53, carbonModifiers: 0)
-
     /// Build a combo from a captured `NSEvent`, or `nil` if it has no usable modifier.
     public static func from(event: NSEvent) -> HotKeyCombo? {
         var carbon: UInt32 = 0

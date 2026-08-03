@@ -244,16 +244,21 @@ struct SettingsView: View {
     }
 
     /// Plain-language explanation of the three levers, plus the current budget.
+    ///
+    /// Deliberately qualitative. TriCap has not measured file sizes across representative screen
+    /// content, so a precise claim ("halving the long edge quarters the file") would be a number
+    /// invented to sound authoritative. What *is* safe to say is the ordering of the levers and
+    /// the reason for it, plus the memory budget, which is computed rather than guessed.
     private var sizeGuidance: String {
         let limits = store.settings.recordingLimits
         return """
-        What drives file size, in order: **resolution** (a recording capped at \
-        \(limits.maxLongEdgePixels) px on its longest edge), then **frame rate** \
-        (\(limits.frameRate) per second), then **quality**. Halving the longest edge cuts a \
-        recording to roughly a quarter; dropping the quality factor a few points barely shows. \
-        At these settings TriCap holds at most \(limits.maxFrameCount) frames, capped at \
-        \(limits.maxFrameBufferBytes / 1_048_576) MB, for up to \(Int(limits.maxDuration)) s. \
-        TriCap never records audio.
+        For a recording, **resolution** and **frame rate** usually move the file size much more \
+        than the **quality** factor does: fewer pixels and fewer frames means less to encode at \
+        all, while the quality factor only changes how hard each frame is squeezed. Exactly how \
+        much depends on what is on screen — a mostly-still window compresses very differently \
+        from a video. At these settings TriCap holds at most \(limits.maxFrameCount) frames, \
+        capped at \(limits.maxFrameBufferBytes / 1_048_576) MB, for up to \
+        \(Int(limits.maxDuration)) s. TriCap never records audio.
         """
     }
 

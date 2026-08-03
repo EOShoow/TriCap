@@ -16,7 +16,31 @@ The working tree is left exactly as verified below.
 
 ---
 
-## 0. Round 3 — usability and quality
+## 0. Round 4 — Codex acceptance fixes
+
+Baseline `bdddb89`. Five findings, all reproduced in the source before being changed.
+
+| # | Root cause confirmed | Fix | Tests |
+|---|---|---|---|
+| 1 | `didSet` assigned `settings = reconciled` and returned; the re-entrant pass then notified with `oldValue = proposal`. For settings written before presets existed — which always load as `.custom` even when their values match a preset — the first edit *also* triggers a relabel, so `onChange` saw `proposal → normalised`, both already carrying the new hot key. `AppDelegate` compared them, saw no change, and never re-registered the shortcut. | `AppSettings.resolveUpdate(previous:proposed:)` returns the normalised value paired with the true previous one; `SettingsStore` guards the re-entrant pass with `isNormalizing`. One normalisation, one persist, one notification. | `SettingsUpdateTests` (7) — the key case asserts `update.previous.hotKey != update.current.hotKey` |
+| 2 | `stop.keyEquivalent = "\r"` on a button inside a borderless floating panel that never becomes key. Nothing registered a global Return. The label said "Return stops". | Label is `Esc cancels · Click Stop to finish`; the `keyEquivalent` is removed with a comment explaining why it could never fire. | snapshot 05 |
+| 3 | `runCountdown` used `NSEvent.addLocalMonitorForEvents`, which only sees keys delivered to TriCap. The global Escape was claimed in `present(...)`, i.e. only once recording had begun — while Settings and the countdown panel both said Escape worked from other apps. | `RecordingChromeController` claims `TransientHotKeyClaim` before the first tick and rebinds it in place for the recording. `RecordingHUD` is now a renderer; the local monitor is gone. | `TransientHotKeyClaimTests` (10) + four new selftest checks on the real Carbon path |
+| 4 | `ToastView` rendered file name, folder·size, clipboard and warning — never `detailDescription`. The round-3 snapshot showed it missing; the claim that dimensions/frames/duration were confirmable was wrong. | The detail line is rendered; the panel height comes from `NSHostingView.fittingSize` so a wrapping warning grows it instead of being clipped. | `ExportSummaryTests` +3 · snapshots 10 and 13 |
+| 5 | `.maximum` was described as "no downscaling and the highest quality factor" while capping at 3840 px and stopping at 20 fps / 95. WebP copy quoted "25–35% smaller than JPEG" and "every current browser"; the size guidance asserted a precise quartering rule. `hasSeenWelcome`'s comment said `true` until shown. | Renamed *Up to 4K*, summary quotes the actual cap. Format and size copy made conditional and unquantified. Comment corrected. Values were **not** raised to 30 fps / 100 — that would multiply recording memory. | `topPresetCopyIsAccurate`, `formatCopyAvoidsInventedNumbers` |
+
+### A hazard the rename exposed
+
+Renaming a `QualityPreset` case changes its persisted raw value. `decodeIfPresent` **throws** on an
+unrecognised raw value (verified with a probe), and `SettingsStore` decodes with `try?` — so a
+stored `"maximum"` would have discarded the user's *entire* settings blob: save folder, vault root,
+hot key, everything. Enum fields now decode through `decodeTolerantly`, falling back to the default
+(or `.custom`, which preserves every stored number). No blob on this machine was affected — the
+domain held only the permission flag — but the same trap would have applied to any future rename or
+to settings written by a newer build.
+
+---
+
+## 0.1 Round 3 — usability and quality
 
 Baseline `df0cacc`. This round is UI/UX, the settings model and tests; the capture, colour-space,
 concurrency and file-writing code reviewed in rounds 1–2 is untouched except where a UX fix needed
@@ -32,7 +56,7 @@ a new read-only accessor.
 | P0 | The menu bar looked identical whether or not TriCap could capture | ✅ | permission state + in-progress row |
 | P0 | The overlay's mode hint vanished on mouse-down; nothing said what release would do | ✅ | persistent banner, corner brackets, release hint |
 | P1 | Quality was raw encoder numbers with no result-oriented choice | ✅ | `QualityPreset` (4 presets + Custom) |
-| P1 | The recording HUD had no cancel affordance and no sense of the limit | ✅ | progress bar + `Esc cancels · Return stops` |
+| P1 | The recording HUD had no cancel affordance and no sense of the limit | ✅ | progress bar + a cancel/stop line — *the wording shipped here was wrong and is corrected in round 4, §0 item 2* |
 | P1 | Tool glyphs unlabelled, no shortcuts | ✅ | active-tool name, `⌘1`–`⌘5`, real tooltips |
 | P1 | Settings mixed limits with quality, always showed every parameter | ✅ | four tabs, conditional Advanced |
 | P1 | The editor never showed the save destination | ✅ | `Saves to …` + **Show in Finder** |
@@ -78,7 +102,7 @@ clamping initializer.
 
 ---
 
-## 0.1 Review round 2 — what changed
+## 0.2 Review round 2 — what changed
 
 Every item was reproduced in the code before being changed; none was taken on trust.
 
@@ -424,14 +448,15 @@ Six PNGs in `build/ui-snapshots/`, all inspected:
 | `02-editor-still.png` | Still editor: 5 tool buttons with the active one highlighted **and named** ("Arrow"), 6-colour palette, stroke slider, undo/redo/clear, composited annotations, `940 × 620 px`, Format PNG **· Lossless**, `Saves to ~/Pictures/TriCap`, Close/Save |
 | `03-editor-clip-trim.png` | Clip editor: mosaic tool selected with its block-size slider, `8 of 12 frames · 0.7 s`, Reset trim, Start=2 / End=9 / Frame=5 sliders, `640 × 400 px  Animated WebP` |
 | `04-selection-overlay.png` | Selection overlay in recording mode: persistent banner "● Record a clip   S screenshot   Esc cancel", punched-out selection with red corner brackets, `940 × 520 px` badge, "Release to start recording" |
-| `05-recording-hud.png` | Recording HUD, now rendered by `RecordingHUD.populateHUD` itself rather than a hand-built copy: `4.2 s / 15 s`, `51 frames · 12 MB`, progress bar toward the limit, **`Esc cancels · Return stops`**, Stop button in dark appearance |
+| `05-recording-hud.png` | Recording HUD, rendered by `RecordingHUD.populateHUD` itself: `4.2 s / 15 s`, `51 frames · 12 MB`, progress bar toward the limit, **`Esc cancels · Click Stop to finish`** (round 4 — it used to promise a Return key that could not work), Stop button in dark appearance |
 | `06-menu-bar-item.png` | Status-item template icon at menu-bar size |
 | `07-editor-single-frame-clip.png` | **Round 2 (B10).** A one-frame clip: `1 of 1 frames · 0.1 s`, *Reset trim* disabled, "Single frame — nothing to trim.", and **no** Start/End/Frame sliders |
 | `08-settings-quality.png` | **Round 3.** Quality tab, Advanced expanded: preset *Balanced* with its summary, format PNG with "Lossless — every pixel is preserved exactly", **PNG quality → "Lossless — no setting"** (no stepper), the four recording parameters, and the size-guidance footer |
 | `09-welcome.png` | **Round 3.** Getting Started: "TriCap is running", the three numbered steps, *Ask macOS now* for the not-determined permission state |
-| `10-export-toast.png` | **Round 3.** Post-export confirmation: file name, `~/Documents/Vault/assets · 1.4 MB`, "Copied the Markdown reference", **Show in Finder** |
+| `10-export-toast.png` | Post-export confirmation: file name, **`1440 × 900 · Animated WebP · 52 frames · 4.7 s`** (round 4 — this line was missing), `~/Documents/Vault/assets · 1.4 MB`, "Copied the Markdown reference", **Show in Finder** |
 | `11-selection-overlay-screenshot.png` | **Round 3.** Screenshot mode: blue banner "● Take a screenshot   R record   Esc cancel", corner brackets, "Release to capture" |
-| `12-recording-countdown.png` | **Round 3.** Countdown: `3`, "Recording starts…", "Esc to cancel" |
+| `12-recording-countdown.png` | Countdown, now drawn by `RecordingHUD.populateCountdown` itself: `3`, "Recording starts…", "Esc to cancel" — and Escape now genuinely works from other apps |
+| `13-export-toast-warning.png` | **Round 4.** The same toast carrying a wrapping warning, proving the panel grows instead of clipping |
 
 **These are offscreen renders of the real view hierarchies** (`NSHostingView` / `SelectionOverlayView`
 in off-screen windows, captured via `CALayer.render(in:)`), not desktop captures — see §4.1 for why,
@@ -549,6 +574,25 @@ from the documented behaviour of those filesystems, not from observation here.
 reports case-*insensitive*. The comparison rule is tested directly as a pure function over path
 components, and `volumeCaseSensitivity(for:)` is tested to agree with whatever this volume reports.
 A case-sensitive APFS volume would exercise the other branch end to end.
+
+### 4.8 Round-4-specific gaps
+
+Screen automation is still declined, so the round-4 changes are evidenced by offscreen renders and
+by unit tests over the extracted logic — not by watching them happen.
+
+| Change | Not verified | How to check by hand |
+|---|---|---|
+| Countdown Escape (#3) | That pressing Escape **while another app is frontmost, during the countdown**, actually aborts. The claim/rebind/release lifecycle is unit-tested and the real Carbon hand-off is exercised in `--selftest`, but nobody pressed the key with Safari in front. | Set a 5 s countdown, start a recording, click into another app, press Escape |
+| Hot-key re-registration (#1) | That the *end-to-end* path re-registers. The notification now carries the real before/after (tested), and `AppDelegate` already re-registers on a hot-key change, but the two were not exercised together against Carbon. | With legacy settings in place, change only the shortcut in Settings, then press the new combination |
+| Toast detail line (#4) | That the panel's computed height is right on a real screen at a different text size or scale factor. | Save a capture, and one that produces the "nothing moved" warning |
+| HUD wording (#2) | Nothing outstanding — the change is a label and the removal of a `keyEquivalent` that could not fire. Worth confirming Return does nothing surprising. | Start a recording, press Return |
+
+**The preset numbers remain a judgement call.** Round 4 corrected the *name and description* of the
+top preset to match its values; it deliberately did **not** raise those values to the encoder
+ceilings (30 fps, quality 100), because that multiplies what a recording holds in memory for a
+difference few people would see. If a reviewer wants different numbers, that is a one-line change
+in `QualityPreset.values` — and `topPresetCopyIsAccurate` will fail until the summary is updated to
+match, which is the point.
 
 ### 4.7 Round-3-specific gaps
 

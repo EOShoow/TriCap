@@ -54,6 +54,38 @@ struct QualityPresetTests {
         }
     }
 
+    @Test("The top preset does not promise more than its values deliver")
+    func topPresetCopyIsAccurate() {
+        // It was called "Maximum" and described as "no downscaling and the highest quality
+        // factor", while actually capping the long edge at 3840 px and stopping at 20 fps / 95.
+        let preset = QualityPreset.highDetail
+        let values = preset.values!
+
+        #expect(!preset.displayName.lowercased().contains("maximum"))
+        #expect(!preset.summary.lowercased().contains("no downscaling"))
+        // The summary quotes the real cap, so the name and the numbers cannot drift apart.
+        #expect(preset.summary.contains("\(values.recordingLongEdgePixels)"))
+        #expect(preset.summary.contains("\(values.recordingFrameRate)"))
+
+        // And it genuinely is not the encoder ceiling on every axis.
+        #expect(values.recordingFrameRate < RecordingLimits.frameRateRange.upperBound)
+        #expect(values.animationQuality < AnimatedWebPOptions.qualityRange.upperBound)
+    }
+
+    @Test("No format explanation states an unmeasured ratio as fact")
+    func formatCopyAvoidsInventedNumbers() {
+        // TriCap has not benchmarked WebP against JPEG on representative screen content, so it
+        // must not quote a percentage. Any digit here would be one.
+        for format in OutputFormat.allCases {
+            let text = format.qualityExplanation
+            #expect(!text.contains("%"), "\(format) quotes a percentage it cannot support")
+            #expect(
+                text.rangeOfCharacter(from: CharacterSet.decimalDigits) == nil,
+                "\(format) states a bare number as fact: \(text)"
+            )
+        }
+    }
+
     @Test("Values that belong to no preset are Custom")
     func unmatchedValuesAreCustom() {
         let odd = QualityPreset.Values(
@@ -134,9 +166,9 @@ struct QualityPresetApplicationTests {
         // `RecordingLimits` clamps whatever it is given; `applyQualityPreset` re-derives the label
         // afterwards so it can never claim a preset that was not actually applied.
         var settings = AppSettings()
-        settings.applyQualityPreset(.maximum)
+        settings.applyQualityPreset(.highDetail)
         #expect(settings.recordingLimits.maxLongEdgePixels == RecordingLimits.longEdgeRange.upperBound)
-        #expect(settings.qualityPreset == .maximum)
+        #expect(settings.qualityPreset == .highDetail)
     }
 }
 
@@ -196,6 +228,36 @@ struct SettingsMigrationTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
         #expect(decoded == original)
         #expect(decoded.qualityPreset == .sharper)
+    }
+
+    @Test("An unknown quality preset falls back to Custom without discarding anything else")
+    func unknownPresetDoesNotDestroySettings() throws {
+        // A preset renamed since the blob was written, or one from a newer build. Strict decoding
+        // would throw, and `SettingsStore`'s `try?` would then drop the user's save folder, vault
+        // root and hot key along with it.
+        let settings = try decode(
+            #"{"qualityPreset": "someFuturePreset", "stillQuality": 73, "filenamePrefix": "Shot", "markdownVaultRootPath": "/tmp/vault"}"#
+        )
+        #expect(settings.qualityPreset == .custom)
+        #expect(settings.stillQuality == 73)
+        #expect(settings.filenamePrefix == "Shot")
+        #expect(settings.markdownVaultRootPath == "/tmp/vault")
+    }
+
+    @Test("An unknown output format or link style also degrades gracefully")
+    func unknownEnumsDegradeGracefully() throws {
+        let settings = try decode(
+            #"{"stillFormat": "avif", "markdownLinkStyle": "orgMode", "filenamePrefix": "Keep"}"#
+        )
+        #expect(settings.stillFormat == AppSettings().stillFormat)
+        #expect(settings.markdownLinkStyle == AppSettings().markdownLinkStyle)
+        #expect(settings.filenamePrefix == "Keep", "the rest of the blob must survive")
+    }
+
+    @Test("A known preset raw value still decodes")
+    func knownPresetDecodes() throws {
+        let settings = try decode(#"{"qualityPreset": "sharper"}"#)
+        #expect(settings.qualityPreset == .sharper)
     }
 
     @Test("An out-of-range legacy value is clamped rather than rejected")

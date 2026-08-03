@@ -72,8 +72,14 @@ enum UISnapshotRenderer {
         )
 
         try write(
-            hosting(exportToastPreview(), size: CGSize(width: 400, height: 140)),
+            hosting(exportToastPreview(), size: CGSize(width: 400, height: 160)),
             to: directory.appendingPathComponent("10-export-toast.png")
+        )
+
+        // The same toast carrying a warning, to prove the extra lines are not clipped.
+        try write(
+            hosting(exportToastWarningPreview(), size: CGSize(width: 400, height: 200)),
+            to: directory.appendingPathComponent("13-export-toast-warning.png")
         )
 
         let still = syntheticStill()
@@ -189,34 +195,15 @@ enum UISnapshotRenderer {
     /// Keeps the snapshot HUD alive until its bitmap has been taken.
     private static var snapshotHUDs: [RecordingHUD] = []
 
-    /// The live recording HUD's countdown panel.
+    /// The *real* countdown panel, populated by `RecordingHUD` itself.
     private static func countdownSnapshot() throws -> NSBitmapImageRep {
-        let size = CGSize(width: 180, height: 176)
-        let content = offscreenContainer(size: size)
+        let content = offscreenContainer(size: RecordingHUD.countdownSize)
         content.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
         content.layer?.cornerRadius = 12
-        content.appearance = NSAppearance(named: .darkAqua)
 
-        let number = NSTextField(labelWithString: "3")
-        number.font = .systemFont(ofSize: 84, weight: .semibold)
-        number.textColor = .white
-        number.alignment = .center
-        number.frame = CGRect(x: 0, y: 52, width: 180, height: 100)
-        content.addSubview(number)
-
-        let caption = NSTextField(labelWithString: "Recording starts…")
-        caption.font = .systemFont(ofSize: 12, weight: .medium)
-        caption.textColor = NSColor.white.withAlphaComponent(0.85)
-        caption.alignment = .center
-        caption.frame = CGRect(x: 0, y: 32, width: 180, height: 18)
-        content.addSubview(caption)
-
-        let hint = NSTextField(labelWithString: "Esc to cancel")
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = NSColor.white.withAlphaComponent(0.6)
-        hint.alignment = .center
-        hint.frame = CGRect(x: 0, y: 14, width: 180, height: 16)
-        content.addSubview(hint)
+        let hud = RecordingHUD()
+        hud.populateCountdown(content, seconds: 3)
+        snapshotHUDs.append(hud)
 
         settle(content)
         return try bitmap(of: content)
@@ -232,6 +219,20 @@ enum UISnapshotRenderer {
                 detailDescription: "1440 × 900 · Animated WebP · 52 frames · 4.7 s",
                 clipboardDescription: "Copied the Markdown reference",
                 warning: nil
+            )
+        )
+    }
+
+    /// The confirmation for a recording that produced no motion — the longest wording it can show.
+    private static func exportToastWarningPreview() -> some View {
+        ExportToastPreview(
+            summary: ExportSummary(
+                fileName: "TriCap-2026-08-03-141530.webp",
+                folderDisplayPath: "~/Pictures/TriCap",
+                sizeDescription: "38 KB",
+                detailDescription: "800 × 600 · Animated WebP",
+                clipboardDescription: "Copied the file path",
+                warning: "Nothing moved during the recording, so this is a single-frame WebP."
             )
         )
     }

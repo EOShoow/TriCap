@@ -18,6 +18,7 @@ public final class RecordingHUD {
     private var hintLabel: NSTextField?
     private var progressBar: NSProgressIndicator?
     private var countdownHintLabel: NSTextField?
+    private var countdownLabel: NSTextField?
 
     /// One proxy per HUD instance. A shared singleton would let a second recording's HUD rebind
     /// the first one's Stop button.
@@ -27,53 +28,67 @@ public final class RecordingHUD {
 
     // MARK: - Countdown
 
-    /// Count `seconds` down over the selection. Returns `false` if the user pressed Esc.
-    public func runCountdown(seconds: Int, over region: CaptureRegion) async -> Bool {
-        guard seconds > 0 else { return true }
+    /// Show the pre-roll countdown panel. Cancellation is the caller's business — see
+    /// `RecordingChromeController`, which owns the system-wide Escape claim.
+    public func showCountdown(seconds: Int, over region: CaptureRegion) {
+        dismissCountdown()
 
-        let window = makeFloatingWindow(size: CGSize(width: 180, height: 176), centeredOn: region)
+        let window = makeFloatingWindow(size: Self.countdownSize, centeredOn: region)
+        guard let content = window.contentView else { return }
+        populateCountdown(content, seconds: seconds)
+        window.orderFrontRegardless()
+        countdownWindow = window
+    }
+
+    public static let countdownSize = CGSize(width: 180, height: 176)
+
+    /// Build the countdown panel's contents.
+    ///
+    /// Shared with the offscreen UI-snapshot renderer so the screenshot is the real panel.
+    public func populateCountdown(_ content: NSView, seconds: Int) {
+        content.appearance = NSAppearance(named: .darkAqua)
+
         let label = NSTextField(labelWithString: "\(seconds)")
         label.font = .systemFont(ofSize: 84, weight: .semibold)
         label.textColor = .white
         label.alignment = .center
-        label.frame = CGRect(x: 0, y: 52, width: 180, height: 100)
-        window.contentView?.addSubview(label)
+        label.frame = CGRect(x: 0, y: 52, width: content.bounds.width, height: 100)
+        content.addSubview(label)
+        countdownLabel = label
 
         let caption = NSTextField(labelWithString: "Recording starts…")
         caption.font = .systemFont(ofSize: 12, weight: .medium)
         caption.textColor = NSColor.white.withAlphaComponent(0.85)
         caption.alignment = .center
-        caption.frame = CGRect(x: 0, y: 32, width: 180, height: 18)
-        window.contentView?.addSubview(caption)
+        caption.frame = CGRect(x: 0, y: 32, width: content.bounds.width, height: 18)
+        content.addSubview(caption)
 
         let cancelHint = NSTextField(labelWithString: "Esc to cancel")
         cancelHint.font = .systemFont(ofSize: 11)
         cancelHint.textColor = NSColor.white.withAlphaComponent(0.6)
         cancelHint.alignment = .center
-        cancelHint.frame = CGRect(x: 0, y: 14, width: 180, height: 16)
-        window.contentView?.addSubview(cancelHint)
+        cancelHint.frame = CGRect(x: 0, y: 14, width: content.bounds.width, height: 16)
+        content.addSubview(cancelHint)
         countdownHintLabel = cancelHint
-        window.orderFrontRegardless()
-        countdownWindow = window
+    }
 
-        let cancelled = CancelWatcher()
-        defer {
-            cancelled.stop()
-            window.orderOut(nil)
-            window.close()
-            countdownWindow = nil
-        }
+    /// Update the big number without rebuilding the panel.
+    public func updateCountdown(remaining: Int) {
+        countdownLabel?.stringValue = "\(remaining)"
+    }
 
-        for remaining in stride(from: seconds, through: 1, by: -1) {
-            label.stringValue = "\(remaining)"
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            } catch {
-                return false
-            }
-            if cancelled.wasCancelled { return false }
-        }
-        return !cancelled.wasCancelled
+    /// Say that Escape could not be claimed, rather than promising a key that does nothing.
+    public func showCountdownEscapeUnavailable() {
+        countdownHintLabel?.stringValue = "Esc unavailable"
+        countdownHintLabel?.textColor = NSColor.systemYellow
+    }
+
+    public func dismissCountdown() {
+        countdownWindow?.orderOut(nil)
+        countdownWindow?.close()
+        countdownWindow = nil
+        countdownLabel = nil
+        countdownHintLabel = nil
     }
 
     // MARK: - Live HUD
@@ -106,7 +121,9 @@ public final class RecordingHUD {
         let stop = NSButton(title: "Stop", target: stopProxy, action: #selector(HUDStopProxy.fire))
         stopProxy.handler = onStop
         stop.bezelStyle = .rounded
-        stop.keyEquivalent = "\r"
+        // Deliberately no `keyEquivalent`. The HUD is a borderless, never-key floating panel, so a
+        // key equivalent on it can never fire — advertising Return as a way to stop was a promise
+        // the window could not keep. Escape works because it is a real system-wide hot key.
         stop.contentTintColor = .white
         stop.frame = CGRect(x: 226, y: 32, width: 58, height: 28)
         content.addSubview(stop)
@@ -144,7 +161,7 @@ public final class RecordingHUD {
 
         // The global Escape hot key is claimed for the whole recording; say so, because a
         // key that works everywhere is worthless if nobody knows it exists.
-        let hint = NSTextField(labelWithString: "Esc cancels · Return stops")
+        let hint = NSTextField(labelWithString: "Esc cancels · Click Stop to finish")
         hint.font = .systemFont(ofSize: 10)
         hint.textColor = NSColor.white.withAlphaComponent(0.6)
         hint.frame = CGRect(x: 16, y: 5, width: 268, height: 14)
@@ -173,6 +190,7 @@ public final class RecordingHUD {
         hintLabel = nil
         progressBar = nil
         countdownHintLabel = nil
+        countdownLabel = nil
     }
 
     /// Replace the "Esc to cancel" affordance with an honest notice when the global Escape hot key
@@ -256,28 +274,6 @@ public final class RecordingHUD {
         content.layer?.cornerRadius = 12
         window.contentView = content
         return window
-    }
-}
-
-/// Watches for Esc while the countdown runs.
-@MainActor
-private final class CancelWatcher {
-    private var monitor: Any?
-    private(set) var wasCancelled = false
-
-    init() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 {
-                self?.wasCancelled = true
-                return nil
-            }
-            return event
-        }
-    }
-
-    func stop() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
     }
 }
 

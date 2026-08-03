@@ -17,6 +17,10 @@ final class ExportToastPresenter {
     /// How long the toast stays up when the user does not interact with it.
     static let visibleDuration: TimeInterval = 6
 
+    static let width: CGFloat = 380
+    /// Floor for the no-warning case, so a short toast still looks deliberate.
+    static let minimumHeight: CGFloat = 132
+
     func show(summary: ExportSummary, fileURL: URL, thumbnail: NSImage?) {
         dismiss()
         revealURL = fileURL
@@ -32,8 +36,16 @@ final class ExportToastPresenter {
             }
         )
 
+        // Fix the width, then let the content decide the height: a colour-space or
+        // motionless-recording warning wraps to two or three lines and must not be clipped.
         let hosting = NSHostingView(rootView: content)
-        hosting.frame = NSRect(x: 0, y: 0, width: 380, height: 118)
+        hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: 1)
+        let fittingHeight = hosting.fittingSize.height
+        hosting.frame = NSRect(
+            x: 0, y: 0,
+            width: Self.width,
+            height: max(Self.minimumHeight, fittingHeight)
+        )
 
         let panel = NSPanel(
             contentRect: hosting.frame,
@@ -117,6 +129,15 @@ struct ToastView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
+                // What was actually produced: dimensions, format, and for a clip its frame count
+                // and playback length. Without this the confirmation cannot answer "did I get the
+                // whole recording?" — which is the main thing a user wants to know.
+                Text(summary.detailDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+
                 Text("\(summary.folderDisplayPath) · \(summary.sizeDescription)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -133,7 +154,10 @@ struct ToastView: View {
                     Label(warning, systemImage: "exclamationmark.triangle")
                         .font(.caption2)
                         .foregroundStyle(.orange)
-                        .lineLimit(2)
+                        .lineLimit(3)
+                        // Let the label grow the panel instead of being cut off; the panel is
+                        // sized from its content below.
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 HStack {

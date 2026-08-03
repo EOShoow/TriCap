@@ -48,6 +48,44 @@ struct ExportSummaryTests {
         #expect(summary.warning == nil)
     }
 
+    @Test("Every summary carries a non-empty detail line for the toast to show")
+    func detailIsAlwaysPresent() {
+        // The detail line was computed and tested but never rendered, so the confirmation could
+        // not answer "did I get the whole recording?". These assertions describe the contract the
+        // toast now relies on.
+        for format in [OutputFormat.png, .jpeg, .webp, .animatedWebP] {
+            let summary = ExportSummary.make(
+                from: result(format: format), copiedReference: true, copiedImage: false, insideVault: false
+            )
+            #expect(!summary.detailDescription.isEmpty, "\(format) has no detail line")
+            #expect(summary.detailDescription.contains("1440 × 900"))
+            #expect(summary.detailDescription.contains(format.displayName))
+        }
+    }
+
+    @Test("A still's detail line has no frame or duration information to invent")
+    func stillDetailHasNoFrames() {
+        let summary = ExportSummary.make(
+            from: result(format: .png), copiedReference: false, copiedImage: false, insideVault: false
+        )
+        #expect(!summary.detailDescription.contains("frames"))
+        #expect(!summary.detailDescription.contains(" s"))
+    }
+
+    @Test("A collapsed recording does not claim a frame count it does not have")
+    func collapsedRecordingDetail() {
+        let info = WebPCodec.AnimationInfo(
+            canvasWidth: 800, canvasHeight: 600, frameCount: 1, loopCount: 1,
+            frameTimestampsMs: [], isAnimated: false
+        )
+        let summary = ExportSummary.make(
+            from: result(format: .animatedWebP, animationInfo: info, collapsed: true),
+            copiedReference: true, copiedImage: false, insideVault: false
+        )
+        #expect(!summary.detailDescription.contains("frames"))
+        #expect(summary.warning != nil, "the collapse is explained in the warning instead")
+    }
+
     @Test("An animation reports its frame count and playback length")
     func animationSummary() {
         let info = WebPCodec.AnimationInfo(

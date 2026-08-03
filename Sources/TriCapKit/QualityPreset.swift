@@ -18,22 +18,27 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
     case balanced
     /// Keeps fine detail — small text, thin lines — at a larger size.
     case sharper
-    /// No downscaling within TriCap's ceiling, top quality factor.
-    case maximum
+    /// The largest frame and the highest frame rate TriCap's presets go to.
+    ///
+    /// Deliberately *not* called "Original size": it caps the long edge at 3840 px, which is a
+    /// downscale on any display taller or wider than that, and it does not raise the frame rate to
+    /// the 30 fps ceiling or the quality factor to 100 — both of which would multiply the memory a
+    /// recording holds for a difference few people could see.
+    case highDetail
     /// The advanced values do not match any preset.
     case custom
 
     public var id: String { rawValue }
 
     /// Presets a user can actually choose. `custom` is a state, not a choice.
-    public static var selectable: [QualityPreset] { [.smallerFile, .balanced, .sharper, .maximum] }
+    public static var selectable: [QualityPreset] { [.smallerFile, .balanced, .sharper, .highDetail] }
 
     public var displayName: String {
         switch self {
         case .smallerFile: return "Smaller file"
         case .balanced: return "Balanced"
         case .sharper: return "Sharper"
-        case .maximum: return "Maximum"
+        case .highDetail: return "Up to 4K"
         case .custom: return "Custom"
         }
     }
@@ -47,8 +52,8 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
             return "TriCap's default. Small text stays readable at a size that pastes comfortably."
         case .sharper:
             return "Keeps thin lines and small text crisp. Files are noticeably larger."
-        case .maximum:
-            return "No downscaling and the highest quality factor. Largest files by far."
+        case .highDetail:
+            return "Recordings up to 3840 px on the long edge at 20 fps. Much larger files, and a recording holds a lot more in memory."
         case .custom:
             return "Your own values. Pick a preset above to go back to a standard set."
         }
@@ -91,7 +96,7 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
             return Values(stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 12, animationQuality: 80)
         case .sharper:
             return Values(stillQuality: 95, recordingLongEdgePixels: 1920, recordingFrameRate: 15, animationQuality: 90)
-        case .maximum:
+        case .highDetail:
             return Values(
                 stillQuality: 100,
                 recordingLongEdgePixels: RecordingLimits.longEdgeRange.upperBound,
@@ -136,11 +141,11 @@ extension OutputFormat {
         case .png:
             return "Lossless — every pixel is preserved exactly. Largest files, and no quality setting to make."
         case .jpeg:
-            return "Lossy and universally supported. Photographs compress well; sharp text and flat colour show artefacts first."
+            return "Lossy, and readable by essentially anything. Photographs compress well; sharp text and flat colour tend to show artefacts first."
         case .webp:
-            return "Lossy, typically 25–35% smaller than JPEG at the same quality. Supported by every current browser."
+            return "Lossy, and usually smaller than JPEG at a comparable setting — how much smaller depends on the image. Supported by current versions of the major browsers."
         case .animatedWebP:
-            return "Lossy, one quality factor for every frame. Resolution and frame rate affect the file size far more than quality does."
+            return "Lossy, with one quality factor applied to every frame. For a recording, resolution and frame rate usually matter more to the file size than the quality factor does."
         }
     }
 

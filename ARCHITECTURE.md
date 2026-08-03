@@ -116,7 +116,20 @@ Carbon's `RegisterEventHotKey` accepts a modifier-less key code and needs no per
 Verified on this machine: `RegisterEventHotKey(kVK_Escape, 0, …)` returns `noErr` with
 `AXIsProcessTrusted() == false`. `GlobalHotKeyMonitor` therefore keeps independent *slots* — the
 user's configurable capture shortcut and a transient recording-cancel key — and
-`RecordingChromeController` claims a bare Escape for the lifetime of the recording only.
+`RecordingChromeController` claims a bare Escape for the lifetime of one capture.
+
+That claim spans the **countdown as well as the recording**. The countdown is the phase a user is
+most likely to abandon, and the phase where TriCap is least likely to be frontmost — the whole
+point of a countdown is to give them time to arrange another window. `TransientHotKeyClaim` holds
+the rules: register once (a duplicate registration fails with `eventHotKeyExistsErr`), rebind the
+action in place when the recording takes over so no keypress falls through the gap, and release
+exactly once on every exit path. The registrar is injected, so those rules are unit-tested without
+Carbon.
+
+There is deliberately **no global stop key**. The HUD is a borderless, never-key floating panel, so
+a `keyEquivalent` on its Stop button could never fire; advertising Return as a way to stop was a
+promise the window could not keep. Stopping is a click; Escape — a real system-wide hot key —
+cancels.
 
 The trade is explicit: while a recording runs (at most `RecordingLimits.maxDuration`), Escape is
 intercepted system-wide. If another application already owns a bare Escape hot key, the HUD says
@@ -146,6 +159,24 @@ applied when it was not.
 `OutputFormat.usesQualityParameter` is what keeps the UI honest: PNG is lossless, `encodePNG`
 takes no quality argument, and the settings window shows *Lossless — no setting* instead of a
 control that does nothing.
+
+Preset names and copy are held to the same standard by tests: the top preset must not claim to be
+an encoder ceiling it is not (it caps at 3840 px / 20 fps / quality 95, deliberately short of the
+30 fps and quality-100 limits), and no format explanation may state a compression ratio TriCap has
+not measured — `formatCopyAvoidsInventedNumbers` fails on any digit in that copy.
+
+### Settings changes are announced once, with the real before-and-after
+
+Normalisation must not be observable as a second edit. `AppSettings.resolveUpdate` pairs a
+normalised proposal with the values it actually replaces, and `SettingsStore` suppresses the
+re-entrant `didSet` its own normalising write causes. Without that, an edit to settings written by
+a build with no presets — which always load as `.custom`, even when their values match a preset —
+reported `proposal → normalised` to the observer. Both sides already carried the new hot key, so
+"did the hot key change?" answered *no* and the shortcut was persisted but never re-registered.
+
+Enum fields decode tolerantly for the same reason: `decodeIfPresent` *throws* on an unrecognised
+raw value, and settings are read with `try?`, so one renamed case would discard the user's save
+folder, vault root and hot key along with it.
 
 ## Coordinate model
 

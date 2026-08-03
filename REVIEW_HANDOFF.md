@@ -6,7 +6,11 @@ The working tree is left exactly as verified below.
 **Environment:** macOS 26.5.2 (25F84), Apple silicon, Swift 6.3.3, Command Line Tools 26.5,
 **no `Xcode.app` installed**. One display attached (1920×1080 pt @ 2.0 → 3840×2160 px).
 
-> **Round 2.** Baseline `83a8c12`. All ten review items are fixed; see
+> **Round 3.** Round-2 commit `f521ac6` was re-reviewed and four remaining Important issues were
+> repaired in the current working tree: colour provenance, sample-queue draining, delayed I/O
+> errors, and unknown-volume case sensitivity. See the updated A3/B7/B8 rows below.
+>
+> **Round 2.** Baseline `83a8c12`. See
 > [§0](#0-review-round-2--what-changed) for the issue → file → test mapping and
 > [§4.6](#46-round-2-specific-gaps) for what round 2 could *not* verify on this machine.
 
@@ -20,12 +24,12 @@ Every item was reproduced in the code before being changed; none was taken on tr
 |---|---|---|---|---|
 | A1 | Recording mutual exclusion released too early | `beginCapture`'s `defer` set `isCapturing = false` as soon as `recordClip` returned, which was right after `hud.showRecordingHUD` — a second trigger then overwrote `self.recorder`, the shared `StopProxy.shared.handler`, the HUD windows and the Esc monitor | `RecordingSession` (awaits full teardown before returning) + `CaptureSessionGate` (single occupancy for the whole pipeline); `HUDStopProxy` is now per-HUD instead of a singleton | `RecordingSessionTests` (10), `CaptureSessionGateTests` (5) |
 | A2 | Static screen never hit the duration ceiling | `FrameConverter` drops non-`.complete` frames, and the `elapsed > maxDuration` check lived inside `stream(_:didOutputSampleBuffer:)`, so with no new frames it never ran | 10 Hz `ContinuousClock` tick in `RegionRecorder` (latched once, invalidates its own timer); `RecordedClip.wallClockDuration`; `ClipTrimmer.trimmedDuration`; `ClipTiming.timeline(totalDuration:)` | `TrimmedDurationTests` (8), `RecordedClipDurationTests` (4), `ClipTimingTests` (10) + selftest §static-screen |
-| A3 | Colour space lost | `finish()` called `teardown()` (which sets `output = nil`) *before* reading `output?.observedColorSpace`, so it was **always** `nil` for recordings | `captureOutputState()` snapshots colour space and first-frame instant before teardown; `RecordedClip.colorSpaceNotice` makes the editor-visible string testable | `ColorSpacePropagationTests` (5) + selftest assertion |
+| A3 | Colour provenance lost / in-flight callback raced stop | Capture originally requested sRGB before source inspection; the first teardown fix also snapshotted before the serial sample queue was drained | `colorSpaceName` is left unset so SCK uses the native display profile; untagged buffers fall back to captured ICC/name metadata, scaling preserves it and P3/EDR metadata reaches the notice. `StreamOutput.commit` and `stopAccepting` share a lock, then teardown drains `sampleQueue` before snapshot/reset | `ColorSpacePropagationTests` (9), `StreamCommitBarrierTests` (2) + selftest assertion |
 | A4 | Editor retain cycle | `onClosed: { window?.close() }` captured the local `var window` box strongly: `window → contentViewController → EditorView → model → closure → box → window` | `EditorPresenter` with a `WindowBox` holding the window **weakly**; `release(_:)` drops the content view controller | selftest §editor window lifecycle asserts `weak` model and window are both `nil` after close |
 | A5 | Recording Esc was local-only | `NSEvent.addLocalMonitorForEvents` only sees keys delivered to TriCap | Carbon `RegisterEventHotKey` with a **bare** Escape in a dedicated slot, claimed only while recording. Verified it needs no Accessibility (see §3.7) | selftest §recording-cancel hot key (8 checks) |
 | B6 | Failed re-registration left no shortcut | `register()` unregisters first; a rejected new combo left both slots empty | `HotKeyRegistrationPolicy.apply` rolls back to the previous combo and the app reverts the stored setting | `HotKeyRegistrationPolicyTests` (6) |
-| B7 | Unconditional case-insensitive containment | `compare(_:options: .caseInsensitive)` regardless of volume | `MarkdownReference.CaseSensitivity`, read from `URLResourceKey.volumeSupportsCaseSensitiveNamesKey`, plus a pure component comparison so the case-sensitive branch is testable without such a volume | `MarkdownCaseSensitivityTests` (6) |
-| B8 | `link(2)` failure aborted the write | exFAT/FAT return `EPERM`, many SMB mounts `ENOTSUP`; the old code threw on anything but `EEXIST` | Three claim strategies tried in order: `link(2)` → `renamex_np(RENAME_EXCL)` → `open(O_CREAT\|O_EXCL)`, with those errnos falling through | `FileClaimStrategyTests` (11, parameterised over all three strategies) |
+| B7 | Unsafe case-insensitive fallback | The first volume-aware fix still treated an unavailable capability as insensitive | `MarkdownReference.CaseSensitivity` uses the reported volume rule and conservatively falls back to sensitive/absolute-path behaviour when unavailable | `MarkdownCaseSensitivityTests` (6) |
+| B8 | Fallback write could report delayed I/O failure as success | The first `O_EXCL` fallback ignored `fsync` and `close` return values | Three atomic claim strategies remain; the `O_EXCL` path now removes the claimed name and returns the saved errno when flush or close fails | `FileClaimStrategyTests` (13, including injected ENOSPC/EIO) |
 | B9 | HUD Stop button contrast | Default (light) appearance rendered a dark bezel + dark label on the dark HUD | `content.appearance = .darkAqua` + white content tint | snapshot `05-recording-hud.png` regenerated |
 | B10 | One-frame clip exposed index 1 | Slider ranges were padded with `max(1, frameCount - 1)` and `max(trimStart + 1, trimEnd)` | `ClipTrimUI` returns `nil` when there is nothing to trim; the editor hides the sliders and says "Single frame — nothing to trim." | `ClipTrimUITests` (4) + snapshot `07-editor-single-frame-clip.png` |
 
@@ -33,6 +37,17 @@ Every item was reproduced in the code before being changed; none was taken on tr
 duration ceiling on every 10 Hz tick (21 callbacks in one run) because `handleAutoStop` only
 guarded on `state == .running`, which stays `.running` until `finish()`. The selftest's "it fired
 exactly once" check caught it; `handleAutoStop` now latches and invalidates its own timer.
+
+### Round-3 verification (2026-08-03)
+
+- `./scripts/test.sh` — **198 tests in 27 suites passed**.
+- `./scripts/test.sh --sanitize=thread --filter StreamCommitBarrierTests` — both commit-barrier
+  regressions passed under ThreadSanitizer.
+- `./scripts/build-app.sh release` — release bundle built, ad-hoc signature verified, and `otool`
+  listed only system frameworks / Swift runtimes.
+- `caffeinate -dimsu .build/debug/TriCap --selftest ./build/codex-round3-selftest-20260803` —
+  **ALL CHECKS PASSED**, including real still capture, moving recording, cancel-after-in-flight,
+  static-screen duration ceiling, export re-read and editor lifecycle.
 
 ---
 
@@ -54,7 +69,7 @@ Delivered in full:
 - Clipboard reference: relative Markdown / Obsidian wiki-link inside the vault root, absolute path
   outside it.
 - libwebp 1.6.0 vendored from source; no runtime dependency on Homebrew or anything else.
-- 134 automated tests; a headless end-to-end `--selftest`; a headless `--render-ui-snapshots`.
+- 198 automated tests; a headless end-to-end `--selftest`; a headless `--render-ui-snapshots`.
 
 Deliberately not implemented (per the brief): OCR, scrolling capture, sensitive-information
 detection, audio, cloud sync, GIF/APNG/WebM, a capture history library, App Store distribution.
@@ -109,7 +124,7 @@ Zero warnings, zero errors (`swift build 2>&1 | grep -c "warning:"` → `0`).
 ```
 
 ```
-✔ Test run with 190 tests in 26 suites passed after 0.495 seconds.
+✔ Test run with 198 tests in 27 suites passed.
 ```
 
 Suites: Coordinate conversion · Output sizing · CaptureRegion resolution · Clip trimming ·
@@ -119,7 +134,7 @@ Annotation document · Annotation rendering · Markdown reference ·
 **Markdown containment case sensitivity** · Output file writing · **Output file claim strategies** ·
 libwebp bridge · Animated WebP frame coalescing · Magic byte detection ·
 Export service (stills / animated WebP / degenerate recordings) · Screen recording permission
-state · **Colour space propagation** · **Clip trim slider ranges** ·
+state · **Colour space propagation** · **Recording stream commit barrier** · **Clip trim slider ranges** ·
 **Hot key registration roll-back**. (Bold = added in round 2.)
 
 Required coverage, mapped:
@@ -446,16 +461,17 @@ A case-sensitive APFS volume would exercise the other branch end to end.
 
 ### 4.5 Other gaps
 
-- **HDR / wide-gamut capture** — the machine's display reports sRGB, so the wide-gamut branch of
-  `ImageProcessing.normalizedToSRGB` never fired in a live capture. The detection list and the
-  user-facing notice are unit-covered only. Verify on a P3 or HDR display.
+- **HDR / wide-gamut capture** — the machine's display reports sRGB, so source-profile capture and
+  the editor notice have not fired in a live capture. Unit tests cover Display P3 preservation,
+  explicit sRGB conversion and the case where an EDR display delivers an sRGB-tagged buffer.
+  Verify the live notice and appearance on a P3/HDR display.
 - **Intel (x86_64)** — never built or run. libwebp's SSE4.1/AVX2 kernels are compiled out (see
   [docs/LIBWEBP.md](docs/LIBWEBP.md) § SIMD); correct but slower. Universal-binary packaging is not
   set up.
 - **macOS 14/15** — the deployment target is 14.0 but only macOS 26.5.2 was available. Nothing
   newer than the 14.0 SDK surface is used knowingly, but this is untested.
-- **Disk-full** — `NSFileWriteOutOfSpaceError` is mapped to friendly copy; only the read-only
-  directory branch is actually exercised by tests.
+- **Disk-full** — `NSFileWriteOutOfSpaceError` is mapped to friendly copy; injected tests exercise
+  delayed `fsync(ENOSPC)` and `close(EIO)` cleanup, but a physically full volume was not used.
 - **Long recordings at the ceiling** — the 15 s / 181-frame / 512 MB limits are unit-tested at the
   `FrameBuffer` level and a 5 s live recording was measured, but a full 15 s live recording that
   actually trips `durationLimit` was not run.
@@ -490,8 +506,8 @@ A case-sensitive APFS volume would exercise the other branch end to end.
    that `waiter` can never be resumed twice.
 2. **`RegionRecorder.tick()` / `handleAutoStop`** — the ceiling now latches and invalidates its own
    timer. Confirm there is no path where `hasAutoStopped` is set but the recording keeps retaining
-   frames, and that `captureOutputState()` is idempotent (it is called from both `finish()` and
-   `cancel()`).
+   frames, and that the shared commit gate plus post-`stopCapture` sample-queue drain cannot deadlock
+   or allow a callback to append after `finish()` / `cancel()`.
 3. **`ClipTrimmer.trimmedDuration`** — the two-case rule is the whole of A2's semantics. Worth
    checking the boundary where `range.upperBound == frames.count - 1` and `clipDuration` is
    *smaller* than the last frame's timestamp (it clamps to 0; `ClipTiming` then floors to

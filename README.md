@@ -70,7 +70,7 @@ TriCap has no Dock icon — look for the viewfinder icon in the menu bar.
 ./scripts/test.sh
 ```
 
-190 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
+198 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
 `Testing.framework` on the search path unless Xcode is the active developer directory; the script
 adds the `-F` and `-rpath` flags that make `swift test` work with CLT only. With Xcode installed,
 plain `swift test` also works.
@@ -151,6 +151,8 @@ If it is anywhere else you get the plain absolute path, because a relative link 
 Containment is checked component-wise on symlink-resolved paths — so `/tmp` and `/private/tmp`
 agree and `/Vault` does not swallow `/VaultBackup` — and names are compared using the *volume's own*
 case rule, because on a case-sensitive volume `Vault/` and `vault/` really are different folders.
+If a network volume cannot report that rule, TriCap conservatively uses an absolute path rather
+than risk copying a relative reference that will not resolve.
 
 ---
 
@@ -163,9 +165,10 @@ pixels. A fifth — capture pixels — differs from display pixels only when the
 downscales a recording; `CaptureRegion` carries both so they cannot be confused. Selections snap
 *outward* to whole pixels and are clamped to the display.
 
-**Colour.** Everything renders and exports as 8-bit **sRGB**, opaque, `R G B X`. The capture
-stream is pinned to sRGB. If a capture arrives in a wide-gamut or HDR space, TriCap converts it
-*and says so* in the editor rather than silently mangling the colours.
+**Colour.** Everything renders and exports as 8-bit **sRGB**, opaque, `R G B X`. Capture first
+uses the source display's public colour profile and records whether the screen is wide-gamut or
+extended-range; only then does TriCap convert to sRGB. P3/HDR downscaling preserves that provenance,
+and the editor surfaces the conversion instead of silently discarding it.
 
 **Memory.** A recording is bounded three ways: frame count (`fps × duration + 1`), a byte ceiling
 on the retained frame buffer (512 MB by default), and the long-edge cap on each frame. Frames are

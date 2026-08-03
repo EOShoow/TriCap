@@ -148,7 +148,7 @@ public enum OutputFileWriter {
 
     // MARK: - Claiming a name
 
-    private enum ClaimResult {
+    enum ClaimResult: Equatable {
         case claimed
         case nameTaken
         /// The filesystem does not implement this primitive; try the next strategy.
@@ -213,8 +213,6 @@ public enum OutputFileWriter {
             if code == EEXIST { return .nameTaken }
             return .failed(code)
         }
-        defer { close(descriptor) }
-
         var written = 0
         let result: Int32? = data.withUnsafeBytes { raw -> Int32? in
             guard let base = raw.baseAddress else { return nil }
@@ -230,10 +228,34 @@ public enum OutputFileWriter {
         }
         if let result {
             // Do not leave a half-written file under the final name.
+            _ = Darwin.close(descriptor)
             try? FileManager.default.removeItem(at: candidate)
             return .failed(result)
         }
-        fsync(descriptor)
+        return finalizeExclusiveCreate(descriptor: descriptor, candidate: candidate)
+    }
+
+    /// Flush and close an `O_EXCL` claim before reporting success. Some filesystems defer write
+    /// failures until `fsync(2)` or `close(2)` (network volumes and a disk becoming full are common
+    /// examples). The final name is removed on either error so callers never receive a path whose
+    /// durability the operating system rejected.
+    static func finalizeExclusiveCreate(
+        descriptor: Int32,
+        candidate: URL,
+        syncOperation: (Int32) -> Int32 = { Darwin.fsync($0) },
+        closeOperation: (Int32) -> Int32 = { Darwin.close($0) }
+    ) -> ClaimResult {
+        if syncOperation(descriptor) != 0 {
+            let code = errno
+            _ = closeOperation(descriptor)
+            try? FileManager.default.removeItem(at: candidate)
+            return .failed(code)
+        }
+        if closeOperation(descriptor) != 0 {
+            let code = errno
+            try? FileManager.default.removeItem(at: candidate)
+            return .failed(code)
+        }
         return .claimed
     }
 

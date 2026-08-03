@@ -26,7 +26,11 @@ public enum StillCaptureService {
             throw TriCapError.captureFailed((error as NSError).localizedDescription)
         }
 
-        guard let normalized = ImageProcessing.normalizedToSRGB(raw) else {
+        guard let normalized = ImageProcessing.normalizedToSRGB(
+            raw,
+            fallbackSourceColorSpace: region.display.displayColorSpace,
+            sourceDisplayIsWideGamutOrHDR: region.display.needsColorConversionNotice
+        ) else {
             throw TriCapError.captureFailed("Could not render the capture into sRGB.")
         }
 

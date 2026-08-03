@@ -49,8 +49,8 @@ public final class RegionRecorder {
     private var startInstant: ContinuousClock.Instant?
     private var stopInstant: ContinuousClock.Instant?
 
-    /// Captured before teardown tears the output down, because `finish()` needs both after the
-    /// stream is gone.
+    /// Captured after the sample queue is drained but before teardown releases the output, because
+    /// `finish()` needs both after the stream is gone.
     private var observedColorSpace: ImageProcessing.ColorSpaceOutcome?
     private var firstFrameInstant: ContinuousClock.Instant?
 
@@ -93,7 +93,12 @@ public final class RegionRecorder {
         let buffer = self.buffer
         let expected = outputPixelSize
 
-        let output = StreamOutput(buffer: buffer, expectedPixelSize: expected)
+        let output = StreamOutput(
+            buffer: buffer,
+            expectedPixelSize: expected,
+            fallbackSourceColorSpace: region.display.displayColorSpace,
+            sourceDisplayIsWideGamutOrHDR: region.display.needsColorConversionNotice
+        )
         output.onAutoStop = { [weak self] reason in
             Task { @MainActor in self?.handleAutoStop(reason) }
         }
@@ -130,8 +135,6 @@ public final class RegionRecorder {
     public func finish() async throws -> RecordedClip {
         if let producedClip { return producedClip }
 
-        // Snapshot everything the output owns *before* teardown releases it.
-        captureOutputState()
         try await teardown()
 
         let snapshot = buffer.snapshot
@@ -164,7 +167,6 @@ public final class RegionRecorder {
     /// Abandon the recording and release every retained frame.
     public func cancel() async {
         stopReason = .cancelled
-        captureOutputState()
         try? await teardown()
         buffer.reset()
         producedClip = nil
@@ -172,15 +174,6 @@ public final class RegionRecorder {
     }
 
     // MARK: - Internals
-
-    /// Copy the values that live on the stream output before `teardown()` drops it.
-    private func captureOutputState() {
-        if let output {
-            observedColorSpace = output.observedColorSpace
-            firstFrameInstant = output.firstFrameInstant
-        }
-        if stopInstant == nil { stopInstant = ContinuousClock.now }
-    }
 
     /// Elapsed time from the first retained frame to the moment capture stopped.
     private func measuredWallClockDuration() -> TimeInterval {
@@ -238,7 +231,11 @@ public final class RegionRecorder {
         }
         state = .finished
         if let output {
+            // `stopAccepting` is a commit barrier: after it returns no callback can append another
+            // frame. Capture the stop instant after that barrier so it is never earlier than the
+            // final retained frame.
             output.stopAccepting()
+            if stopInstant == nil { stopInstant = ContinuousClock.now }
             try? stream.removeStreamOutput(output, type: .screen)
         }
         do {
@@ -248,18 +245,46 @@ public final class RegionRecorder {
             // frames we have are still valid, so this is logged rather than propagated.
             TriCapLog.capture.error("stopCapture: \(error.localizedDescription, privacy: .public)")
         }
+        // ScreenCaptureKit invokes callbacks on this serial queue. Removing the output and stopping
+        // capture prevents new callbacks; enqueuing a barrier afterwards waits for every callback
+        // that was already in flight to finish before we snapshot or reset shared state.
+        await drainSampleQueue()
+        if let output {
+            let snapshot = output.stateSnapshot
+            observedColorSpace = snapshot.observedColorSpace
+            firstFrameInstant = snapshot.firstFrameInstant
+        }
         self.stream = nil
         self.output = nil
         self.delegate = nil
+    }
+
+    private func drainSampleQueue() async {
+        await withCheckedContinuation { continuation in
+            sampleQueue.async { continuation.resume() }
+        }
     }
 }
 
 // MARK: - SCK plumbing
 
 /// Receives sample buffers on `sampleQueue`. Everything here runs off the main actor.
-private final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
+final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
+    struct StateSnapshot: Sendable {
+        let observedColorSpace: ImageProcessing.ColorSpaceOutcome?
+        let firstFrameInstant: ContinuousClock.Instant?
+    }
+
+    enum CommitResult: Sendable, Equatable {
+        case accepted
+        case rejectedAfterStop
+        case autoStop(RecordingStopReason)
+    }
+
     private let buffer: FrameBuffer
     private let expectedPixelSize: CGSize
+    private let fallbackSourceColorSpace: CGColorSpace
+    private let sourceDisplayIsWideGamutOrHDR: Bool
 
     private let lock = NSLock()
     private var baseTimestamp: TimeInterval?
@@ -269,22 +294,25 @@ private final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable 
 
     var onAutoStop: (@Sendable (RecordingStopReason) -> Void)?
 
-    var observedColorSpace: ImageProcessing.ColorSpaceOutcome? {
+    var stateSnapshot: StateSnapshot {
         lock.lock()
         defer { lock.unlock() }
-        return _observedColorSpace
+        return StateSnapshot(
+            observedColorSpace: _observedColorSpace,
+            firstFrameInstant: _firstFrameInstant
+        )
     }
 
-    /// Monotonic instant at which the first frame was retained.
-    var firstFrameInstant: ContinuousClock.Instant? {
-        lock.lock()
-        defer { lock.unlock() }
-        return _firstFrameInstant
-    }
-
-    init(buffer: FrameBuffer, expectedPixelSize: CGSize) {
+    init(
+        buffer: FrameBuffer,
+        expectedPixelSize: CGSize,
+        fallbackSourceColorSpace: CGColorSpace = ImageProcessing.outputColorSpace,
+        sourceDisplayIsWideGamutOrHDR: Bool = false
+    ) {
         self.buffer = buffer
         self.expectedPixelSize = expectedPixelSize
+        self.fallbackSourceColorSpace = fallbackSourceColorSpace
+        self.sourceDisplayIsWideGamutOrHDR = sourceDisplayIsWideGamutOrHDR
     }
 
     /// Latch the output closed without firing `onAutoStop`. Used by the recorder's own teardown
@@ -298,41 +326,67 @@ private final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
 
-        lock.lock()
-        let alreadyStopped = stopped
-        lock.unlock()
-        if alreadyStopped { return }
+        guard isAccepting else { return }
 
-        guard let frame = FrameConverter.frame(from: sampleBuffer, expectedPixelSize: expectedPixelSize) else {
+        guard let frame = FrameConverter.frame(
+            from: sampleBuffer,
+            expectedPixelSize: expectedPixelSize,
+            fallbackSourceColorSpace: fallbackSourceColorSpace,
+            sourceDisplayIsWideGamutOrHDR: sourceDisplayIsWideGamutOrHDR
+        ) else {
             return
         }
-
-        let now = ContinuousClock.now
-        lock.lock()
-        if _observedColorSpace == nil { _observedColorSpace = frame.colorSpace }
-        if baseTimestamp == nil { baseTimestamp = frame.presentationSeconds }
-        if _firstFrameInstant == nil { _firstFrameInstant = now }
-        let base = baseTimestamp ?? frame.presentationSeconds
-        lock.unlock()
-
-        let elapsed = max(0, frame.presentationSeconds - base)
 
         guard let png = ImageProcessing.pngData(from: frame.image) else {
-            buffer.noteDropped()
+            noteDroppedIfAccepting()
             return
         }
 
-        if !buffer.append(RecordedFrame(pngData: png, timestamp: elapsed)) {
-            latchStop(buffer.latchedLimit ?? .frameCountLimit)
+        switch commit(frame: frame, pngData: png, receivedAt: ContinuousClock.now) {
+        case .accepted, .rejectedAfterStop:
+            break
+        case .autoStop(let reason):
+            onAutoStop?(reason)
         }
     }
 
-    private func latchStop(_ reason: RecordingStopReason) {
+    /// The single commit point for decoded frames. Encoding happens outside the lock, but this
+    /// method re-checks `stopped` while holding the same lock as `stopAccepting()`. Consequently,
+    /// once `stopAccepting()` returns, an earlier callback can no longer append after cancellation
+    /// or after finish has taken its snapshot.
+    func commit(
+        frame: FrameConverter.Frame,
+        pngData: Data,
+        receivedAt: ContinuousClock.Instant = .now
+    ) -> CommitResult {
         lock.lock()
-        let first = !stopped
-        stopped = true
-        lock.unlock()
-        if first { onAutoStop?(reason) }
+        defer { lock.unlock() }
+        guard !stopped else { return .rejectedAfterStop }
+
+        let base = baseTimestamp ?? frame.presentationSeconds
+        let elapsed = max(0, frame.presentationSeconds - base)
+        guard buffer.append(RecordedFrame(pngData: pngData, timestamp: elapsed)) else {
+            stopped = true
+            return .autoStop(buffer.latchedLimit ?? .frameCountLimit)
+        }
+
+        if baseTimestamp == nil { baseTimestamp = frame.presentationSeconds }
+        if _observedColorSpace == nil { _observedColorSpace = frame.colorSpace }
+        if _firstFrameInstant == nil { _firstFrameInstant = receivedAt }
+        return .accepted
+    }
+
+    private var isAccepting: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !stopped
+    }
+
+    private func noteDroppedIfAccepting() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped else { return }
+        buffer.noteDropped()
     }
 }
 

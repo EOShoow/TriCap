@@ -20,7 +20,12 @@ enum FrameConverter {
     }
 
     /// `nil` means "skip this sample": SCK sends idle/blank frames when nothing on screen changed.
-    static func frame(from sampleBuffer: CMSampleBuffer, expectedPixelSize: CGSize) -> Frame? {
+    static func frame(
+        from sampleBuffer: CMSampleBuffer,
+        expectedPixelSize: CGSize,
+        fallbackSourceColorSpace: CGColorSpace? = nil,
+        sourceDisplayIsWideGamutOrHDR: Bool = false
+    ) -> Frame? {
         guard CMSampleBufferIsValid(sampleBuffer) else { return nil }
 
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
@@ -34,7 +39,10 @@ enum FrameConverter {
         }
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-        guard let raw = cgImage(from: pixelBuffer) else { return nil }
+        guard let raw = cgImage(
+            from: pixelBuffer,
+            fallbackSourceColorSpace: fallbackSourceColorSpace
+        ) else { return nil }
 
         // SCK may hand back a surface larger than the requested size (IOSurface alignment).
         // `contentRect` is in points, `scaleFactor` converts it to the buffer's pixels.
@@ -68,7 +76,10 @@ enum FrameConverter {
             sized = cropped
         }
 
-        guard let normalized = ImageProcessing.normalizedToSRGB(sized) else { return nil }
+        guard let normalized = ImageProcessing.normalizedToSRGB(
+            sized,
+            sourceDisplayIsWideGamutOrHDR: sourceDisplayIsWideGamutOrHDR
+        ) else { return nil }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let seconds = pts.isValid && !pts.isIndefinite ? pts.seconds : 0
@@ -76,7 +87,10 @@ enum FrameConverter {
         return Frame(image: normalized.image, presentationSeconds: seconds, colorSpace: normalized.outcome)
     }
 
-    private static func cgImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
+    private static func cgImage(
+        from pixelBuffer: CVPixelBuffer,
+        fallbackSourceColorSpace: CGColorSpace?
+    ) -> CGImage? {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
@@ -91,9 +105,10 @@ enum FrameConverter {
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue)
             .union(.byteOrder32Little)
 
-        // The colour space is whatever the stream was configured with (sRGB); attaching it here
-        // keeps `normalizedToSRGB` honest about whether a conversion actually happened.
+        // The colour space is the source display profile requested from ScreenCaptureKit. Attaching
+        // it here preserves provenance until `normalizedToSRGB` records and performs the conversion.
         let space = CVImageBufferGetColorSpace(pixelBuffer)?.takeUnretainedValue()
+            ?? fallbackSourceColorSpace
             ?? ImageProcessing.outputColorSpace
 
         guard let context = CGContext(

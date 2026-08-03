@@ -158,12 +158,16 @@ disagree.
 One colour space, one pixel layout, everywhere: **8-bit sRGB, opaque, `R G B X`**
 (`CGImageAlphaInfo.noneSkipLast | .byteOrder32Big`).
 
-- `SCStreamConfiguration.colorSpaceName` is pinned to sRGB for both capture paths.
-- `ImageProcessing.normalizedToSRGB` re-renders every capture into that layout and reports what
-  the source space was and whether a conversion happened.
-- A wide-gamut or HDR source (`Display P3`, `Rec. 2020`, PQ/HLG, extended sRGB…) is detected by
-  name and surfaced to the user in the editor: *"colours outside sRGB have been mapped into gamut
-  and HDR highlights are clipped."* The conversion is not silent.
+- `DisplaySurvey` records the public `NSScreen` wide-gamut flag and extended dynamic-range
+  capability. `SCStreamConfiguration.colorSpaceName` is deliberately left unset, invoking
+  ScreenCaptureKit's documented default of the display's native profile. This also avoids storing
+  a temporary Swift bridge in the SDK's non-retaining `assign CFStringRef` property.
+- Intermediate downscaling retains the source profile. `ImageProcessing.normalizedToSRGB` then
+  re-renders into the canonical layout and reports what source conversion happened.
+- A wide-gamut or HDR source (`Display P3`, `Rec. 2020`, PQ/HLG, extended sRGB, or an EDR display)
+  is surfaced to the user in the editor: *"colours outside sRGB have been mapped into gamut and
+  HDR highlights are clipped."* The conversion is not silent even if ScreenCaptureKit delivers an
+  sRGB-tagged buffer from an EDR display.
 - Fixing the layout at RGBX means the libwebp bridge can use `WebPPictureImportRGBX`
   unconditionally. Importing this buffer as RGBA would read the unused X byte as alpha and produce
   a fully transparent file — there is a regression test for exactly that.
@@ -181,7 +185,9 @@ A 15 s × 12 fps × 1440 px recording is ~180 frames; held as decoded bitmaps th
    `RecordingStopReason` the recorder observes. Once latched, further appends are rejected without
    growing memory.
 4. `SCStreamConfiguration.queueDepth = 5` bounds what SCK buffers for us.
-5. Export pulls frames back **one at a time** through `AnimationFrameSource.loadFrame`, so peak
+5. Stop/cancel closes a commit gate shared with the sample callback, then removes the stream output,
+   stops capture and drains the serial sample queue before snapshotting or resetting the buffer.
+6. Export pulls frames back **one at a time** through `AnimationFrameSource.loadFrame`, so peak
    usage during encoding is one decoded frame plus libwebp's canvas.
 
 ## Annotation model

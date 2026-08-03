@@ -22,6 +22,11 @@ public enum ImageProcessing {
 
     /// Create an opaque sRGB RGBX drawing context of the given pixel size.
     public static func makeContext(width: Int, height: Int) -> CGContext? {
+        makeContext(width: width, height: height, colorSpace: outputColorSpace)
+    }
+
+    /// Create an opaque RGBX context while retaining an intermediate image's source profile.
+    private static func makeContext(width: Int, height: Int, colorSpace: CGColorSpace) -> CGContext? {
         guard width > 0, height > 0 else { return nil }
         return CGContext(
             data: nil,
@@ -29,7 +34,7 @@ public enum ImageProcessing {
             height: height,
             bitsPerComponent: 8,
             bytesPerRow: width * 4,
-            space: outputColorSpace,
+            space: colorSpace,
             bitmapInfo: outputBitmapInfo.rawValue
         )
     }
@@ -53,7 +58,7 @@ public enum ImageProcessing {
 
         public var userFacingNotice: String? {
             guard wasWideGamutOrHDR else { return nil }
-            return "Captured content was \(sourceName). TriCap exports 8-bit sRGB, so colours outside sRGB have been mapped into gamut and HDR highlights are clipped."
+            return "Captured content was \(sourceName). TriCap exports 8-bit sRGB, so colours outside sRGB are gamut-mapped and extended-range highlights, when present, are clipped."
         }
     }
 
@@ -61,15 +66,39 @@ public enum ImageProcessing {
     ///
     /// Always returns a freshly rendered image (never the input) so downstream code can rely on
     /// the exact layout. Returns `nil` only if a context of that size cannot be allocated.
-    public static func normalizedToSRGB(_ image: CGImage) -> (image: CGImage, outcome: ColorSpaceOutcome)? {
-        let sourceSpace = image.colorSpace
-        let sourceName = (sourceSpace?.name as String?) ?? "unknown colour space"
+    public static func normalizedToSRGB(
+        _ image: CGImage,
+        fallbackSourceColorSpace: CGColorSpace? = nil,
+        sourceDisplayIsWideGamutOrHDR: Bool = false
+    ) -> (image: CGImage, outcome: ColorSpaceOutcome)? {
+        let sourceSpace = resolvedSourceColorSpace(
+            imageColorSpace: image.colorSpace,
+            fallback: fallbackSourceColorSpace
+        )
+        let profileName = (sourceSpace?.name as String?) ?? "unknown colour space"
+        let bufferIdentifiesWideGamutOrHDR = isWideGamutOrHDR(sourceSpace)
+        let sourceName = sourceDisplayIsWideGamutOrHDR && !bufferIdentifiesWideGamutOrHDR
+            ? "\(profileName) (wide-gamut or extended-range display)"
+            : profileName
         let isAlreadySRGB = sourceSpace?.name == CGColorSpace.sRGB
-        let wide = isWideGamutOrHDR(sourceSpace)
+        let wide = bufferIdentifiesWideGamutOrHDR || sourceDisplayIsWideGamutOrHDR
+
+        // SCScreenshotManager and some SCStream pixel buffers omit the colour attachment even
+        // though the pixels are in the display-native profile. Attach the public NSScreen profile
+        // before drawing so Core Graphics performs the intended conversion rather than treating
+        // the bytes as uncalibrated device RGB.
+        let sourceImage: CGImage
+        if image.colorSpace == nil,
+           let sourceSpace,
+           let tagged = image.copy(colorSpace: sourceSpace) {
+            sourceImage = tagged
+        } else {
+            sourceImage = image
+        }
 
         guard let context = makeContext(width: image.width, height: image.height) else { return nil }
         context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.draw(sourceImage, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         guard let out = context.makeImage() else { return nil }
 
         return (
@@ -80,6 +109,13 @@ public enum ImageProcessing {
                 wasWideGamutOrHDR: wide
             )
         )
+    }
+
+    static func resolvedSourceColorSpace(
+        imageColorSpace: CGColorSpace?,
+        fallback: CGColorSpace?
+    ) -> CGColorSpace? {
+        imageColorSpace ?? fallback
     }
 
     /// Wide-gamut and HDR spaces we refuse to convert silently.
@@ -109,7 +145,11 @@ public enum ImageProcessing {
         let h = Int(size.height.rounded())
         guard w > 0, h > 0 else { return nil }
         if w == image.width && h == image.height { return image }
-        guard let context = makeContext(width: w, height: h) else { return nil }
+        guard let context = makeContext(
+            width: w,
+            height: h,
+            colorSpace: image.colorSpace ?? outputColorSpace
+        ) else { return nil }
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return context.makeImage()

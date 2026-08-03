@@ -90,18 +90,22 @@ public enum MarkdownReference {
     ///
     /// Uses the public `URLResourceKey.volumeSupportsCaseSensitiveNamesKey`. When the answer is
     /// unavailable (the path does not exist yet, or the volume does not report the attribute) it
-    /// falls back to `.insensitive`, matching how macOS formats APFS by default — the safer
-    /// default, since treating a case-insensitive volume as case-sensitive would wrongly reject a
-    /// file that really is inside the vault.
+    /// falls back to `.sensitive`. That may conservatively produce an absolute path on an unusual
+    /// case-insensitive volume, but it cannot emit a relative reference that fails to resolve on a
+    /// case-sensitive network volume.
     public static func volumeCaseSensitivity(for url: URL) -> CaseSensitivity {
-        let probe = deepestExistingAncestor(of: url.standardizedFileURL)
-        guard let probe,
-              let values = try? probe.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]),
-              let sensitive = values.volumeSupportsCaseSensitiveNames
-        else {
-            return .insensitive
-        }
-        return sensitive ? .sensitive : .insensitive
+        let standardized = url.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: standardized.path) else { return .sensitive }
+        let values = try? standardized.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+        return caseSensitivity(reportedByVolume: values?.volumeSupportsCaseSensitiveNames)
+    }
+
+    /// Convert the optional volume capability into a containment rule. `nil` is deliberately
+    /// conservative: rejecting a relative path is recoverable (the absolute path still works),
+    /// while accepting one under the wrong case rule produces a broken Markdown reference.
+    static func caseSensitivity(reportedByVolume value: Bool?) -> CaseSensitivity {
+        guard let value else { return .sensitive }
+        return value ? .sensitive : .insensitive
     }
 
     // MARK: - Reference strings

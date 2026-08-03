@@ -20,12 +20,17 @@ public enum DisplaySurvey {
         return screens.compactMap { screen -> DisplayGeometry? in
             guard let displayID = screen.displayID else { return nil }
             let quartzBounds = CGDisplayBounds(displayID)
+            let sourceColorSpace = screen.colorSpace?.cgColorSpace
             return DisplayGeometry(
                 displayID: displayID,
                 appKitBounds: screen.frame,
                 quartzBounds: quartzBounds,
                 pointPixelScale: screen.backingScaleFactor,
-                primaryHeightInPoints: primaryHeight
+                primaryHeightInPoints: primaryHeight,
+                colorSpaceName: sourceColorSpace?.name as String?,
+                colorProfileData: sourceColorSpace?.copyICCData() as Data?,
+                colorProfileIsWideGamut: sourceColorSpace?.isWideGamutRGB ?? false,
+                usesExtendedDynamicRange: screen.maximumExtendedDynamicRangeColorComponentValue > 1
             )
         }
     }

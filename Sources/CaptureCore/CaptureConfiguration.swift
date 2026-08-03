@@ -32,7 +32,10 @@ enum CaptureConfiguration {
     /// - `width`/`height` are in **capture pixels**. Passing the pixel-snapped size (optionally
     ///   downscaled by the long-edge cap) means SCK does the resampling for us, and no frame is
     ///   ever larger than the ceiling we agreed to hold in memory.
-    /// - `colorSpaceName` is pinned to sRGB so the pipeline has one predictable colour space.
+    /// - `colorSpaceName` is deliberately left unset. The public ScreenCaptureKit contract then
+    ///   uses the display's native colour space. Its Objective-C property is non-retaining
+    ///   (`assign CFStringRef`), so assigning a dynamically bridged Swift `String` would also create
+    ///   a dangling-reference risk during asynchronous capture.
     static func streamConfiguration(
         region: CaptureRegion,
         outputPixelSize: CGSize,
@@ -46,7 +49,6 @@ enum CaptureConfiguration {
         config.captureResolution = .best
         config.showsCursor = showsCursor
         config.pixelFormat = kCVPixelFormatType_32BGRA
-        config.colorSpaceName = CGColorSpace.sRGB
         config.ignoreShadowsSingleWindow = true
         config.ignoreShadowsDisplay = true
         return config

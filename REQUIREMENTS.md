@@ -19,7 +19,7 @@ rendered image in `build/ui-snapshots/`; `manual` = needs a human (listed in REV
 | # | Requirement | Implementation | Verified by |
 |---|---|---|---|
 | M1 | Default shortcut `⌥⇧5`, changeable in settings | `HotKeyCombo.default`, `HotKeyRecorder` in [SettingsView.swift](Sources/TriCapApp/SettingsView.swift) | snapshot 01 · manual |
-| M2 | `Esc` cancels | `SelectionOverlayView.keyDown`/`cancelOperation`; a **system-wide** Carbon Escape hot key during recording ([RecordingChromeController.swift](Sources/TriCapApp/RecordingChromeController.swift)); `.cancelAction` in the editor | selftest (hot-key slots) · manual |
+| M2 | `Esc` cancels | `SelectionOverlayView.keyDown`/`cancelOperation`; a **system-wide** Carbon Escape hot key during recording and while a pin is open, shared through `PriorityHotKeyClaim` ([RecordingChromeController.swift](Sources/TriCapApp/RecordingChromeController.swift), `PinboardController`); `.cancelAction` in the editor | selftest (hot-key slots) · *Shared Escape stack* · manual |
 | M3 | Region screenshot | [StillCaptureService.swift](Sources/CaptureCore/StillCaptureService.swift) | selftest |
 | M4 | Region short recording | [RegionRecorder.swift](Sources/CaptureCore/RegionRecorder.swift) | selftest |
 | M5 | Recording countdown | `RecordingHUD.runCountdown` | manual |
@@ -99,6 +99,32 @@ Also fixed while renaming the preset: an unrecognised enum raw value made `decod
 discarded the user's entire settings blob. Enum fields now decode tolerantly
 (*Settings migration* → unknown preset / unknown format).
 
+## Round 5 — pinning, window-aware selection, clipboard-first, app icon
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| N1 | An independent global **pin** shortcut, default bare `F3`, registered/migrated/rolled back separately from the screenshot shortcut | `AppSettings.pinHotKey`, `GlobalHotKeyMonitor.Slot.pinFromClipboard`, `AppDelegate.registerPinHotKey` | *Bare-key allow list* (6), *Independent shortcut registration* (3), *Pin shortcut migration* (5) · selftest §pin hot key |
+| N2 | Modifier-less binding restricted to explicit function keys — never letters or digits | `HotKeyCombo.bareKeyAllowList` (F1–F20), `isValid` | *Bare-key allow list* — refuses A, 5, Space, Return, Delete, Escape |
+| N3 | A failed `F3` registration (Mission Control) is reported and re-bindable — never silently substituted | `AppDelegate.pinShortcutUnavailableMessage`, `HotKeyRegistrationPolicy` rollback | *Independent shortcut registration* · selftest reports which branch this machine takes |
+| N4 | Read PNG / TIFF / system image objects from the pasteboard; every press makes an independent pin | [PasteboardImage.swift](Sources/ExportCore/PasteboardImage.swift), `PinboardController.pinFromClipboard` | *Pasteboard image policy* (9) · selftest §pin windows |
+| N5 | Nothing on the clipboard creates no window, only a notice | `PinOutcome.nothingToPin`, `ExportToast.showNotice` | selftest (empty and text-only clipboards) |
+| N6 | Count / pixel / memory ceilings on pins | `PinLimits` (12 pins, 120 MP total, 40 MP each) | *Pin memory limits* (7) · selftest (ceiling refuses the third pin) |
+| N7 | Borderless, never takes keyboard focus, above ordinary windows but below system security UI, all Spaces + full-screen | [PinWindow.swift](Sources/TriCapApp/PinWindow.swift) — `.floating`, `canBecomeKey == false`, `.nonactivatingPanel`, `orderFrontRegardless()` | selftest asserts level, key-window and collection behaviour on real windows |
+| N8 | A pin fits its display and can never be dragged irretrievably off-screen | `PinPlacement.initialFrame` / `clampReachable` / `clampFullyOnScreen` | *Pin placement* (7) |
+| N9 | Drag, pointer-anchored scroll/pinch zoom with limits, adjustable opacity, context menu, `Esc` closes, menu closes all | `PinContentView`, `PinZoom`, `PinOpacity`, `PinWindow.makeContextMenu` | *Pin zoom* (5), *Pin opacity* (2) · selftest |
+| N10 | Teardown releases window, bitmap and hot-key claim, and is idempotent | `PinWindow.tearDown()`, `PinboardController.close`/`closeAll` | selftest asserts the bitmap and content view are released, and that closing twice is harmless |
+| N11 | `Esc` is shared between recording-cancel and pin-dismiss without either losing it | [PriorityHotKeyClaim.swift](Sources/TriCapKit/PriorityHotKeyClaim.swift) + `SharedEscapeKey` — one registration, a stack of handlers | *Shared Escape stack* (8) |
+| N12 | Hovering highlights the topmost valid window; a click captures it | `WindowPicker`, [WindowSurvey.swift](Sources/CaptureCore/WindowSurvey.swift), `SelectionOverlayView.drawWindowHighlight` | *Window picking* (10) · snapshot 14 |
+| N13 | Free drag still works; a click becomes a drag past a threshold, and never reverts | `SelectionGesture` (6 pt, radial, sticky) | *Click versus drag* (4) |
+| N14 | Edges snap within ~8 pt of window and display edges; Option disables it | `SnapEngine` (per-axis, refuses degenerate snaps) | *Edge snapping* (9) |
+| N15 | Exclude TriCap itself, off-screen/minimised, zero-size and system decoration layers; handle overlap, multi-display, negative coordinates, mixed scale factors | `WindowPicker.isSelectable` / `window(at:in:)`, `CoordinateConverter.appKitRect` | *Window picking* — self, off-screen, level > 0, tiny, negative coordinates, stacking order |
+| N16 | A still capture goes to the clipboard by default: no editor, no file | `StillCaptureAction.copyToClipboard`, `AppDelegate.captureStill(region:forceEditor:)` | *Screenshot post-capture action* (2) · manual |
+| N17 | The clipboard write offers `public.png` plus a system image, and only reports success if it happened | `PasteboardImage.write` returns `nil` when the pasteboard refuses everything; `WriteReceipt.wroteRasterData` | *Pasteboard image policy* |
+| N18 | A clipboard failure is recoverable, not silent | `AppDelegate.presentClipboardFailure` offers the editor instead | manual |
+| N19 | Settings shows both shortcuts separately and a post-screenshot choice; the menu keeps *Screenshot and Edit…*, *Pin from Clipboard*, *Close All Pins* | [SettingsView.swift](Sources/TriCapApp/SettingsView.swift), `AppDelegate.buildMenu` | snapshot 01 · manual |
+| N20 | Original app icon: deep→bright blue viewfinder, small coral shutter dot, no text or third-party art, legible small | [scripts/generate-icon.swift](scripts/generate-icon.swift) — Core Graphics paths, *is* the source | `iconutil`/`sips`/`plutil` checks in REVIEW_HANDOFF.md · light and dark contact sheets |
+| N21 | 1024 master, full `.iconset`, `.icns`, light/dark check sheets, `CFBundleIconFile`, copied in before `codesign`; menu bar stays monochrome | `Resources/AppIcon/`, [Info.plist](Resources/Info.plist), [build-app.sh](scripts/build-app.sh) | `codesign --verify` · `NSWorkspace.icon(forFile:)` probe · snapshot 06 (menu bar still a template) |
+
 ## Deliverables
 
 | Deliverable | Location |
@@ -107,5 +133,6 @@ discarded the user's entire settings blob. Enum fields now decode tolerantly
 | README (features, build, run, permission, usage, limits) | [README.md](README.md) |
 | Architecture / requirements docs | [ARCHITECTURE.md](ARCHITECTURE.md), this file |
 | libwebp licence and integration notes | [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), [docs/LIBWEBP.md](docs/LIBWEBP.md) |
-| Automated tests | `Tests/TriCapTests/` (198), `./scripts/test.sh` |
+| Automated tests | `Tests/TriCapTests/` (339), `./scripts/test.sh` |
+| App icon source and outputs | [scripts/generate-icon.swift](scripts/generate-icon.swift), `Resources/AppIcon/` |
 | Review handoff | [REVIEW_HANDOFF.md](REVIEW_HANDOFF.md) |

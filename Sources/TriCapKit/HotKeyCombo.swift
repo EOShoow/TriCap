@@ -27,12 +27,37 @@ public struct HotKeyCombo: Codable, Equatable, Hashable, Sendable {
         carbonModifiers & modifier.rawValue != 0
     }
 
-    /// A hot key with no modifiers would swallow ordinary typing system-wide, so we refuse it.
-    public var isValid: Bool {
+    /// `true` when at least one of ⌘ ⌥ ⌃ ⇧ is held.
+    public var hasModifier: Bool {
         carbonModifiers & (CarbonModifier.command.rawValue
             | CarbonModifier.shift.rawValue
             | CarbonModifier.option.rawValue
             | CarbonModifier.control.rawValue) != 0
+    }
+
+    /// Keys that may be claimed system-wide *without* a modifier.
+    ///
+    /// Strictly the function row. A modifier-less hot key is swallowed everywhere, so binding a
+    /// letter or a digit would make that character untypeable in every application — which is why
+    /// this is an allow-list of specific key codes rather than a "no modifier needed" flag.
+    /// Escape is deliberately absent: it is claimed only transiently, during a recording, through
+    /// `TransientHotKeyClaim`, never as a persistent shortcut.
+    public static let bareKeyAllowList: Set<UInt32> = [
+        122, 120, 99, 118,        // F1 F2 F3 F4
+        96, 97, 98, 100,          // F5 F6 F7 F8
+        101, 109, 103, 111,       // F9 F10 F11 F12
+        105, 107, 113, 106,       // F13 F14 F15 F16
+        64, 79, 80, 90,           // F17 F18 F19 F20
+    ]
+
+    /// Whether this key code may stand alone as a shortcut.
+    public var isAllowedAsBareKey: Bool {
+        Self.bareKeyAllowList.contains(keyCode)
+    }
+
+    /// Whether the user may bind this combination as a persistent shortcut.
+    public var isValid: Bool {
+        hasModifier || isAllowedAsBareKey
     }
 
     /// `⌥⇧5` — order matches the macOS menu convention (⌃⌥⇧⌘).
@@ -48,17 +73,25 @@ public struct HotKeyCombo: Codable, Equatable, Hashable, Sendable {
 
     /// A bare Escape, used only as the transient recording-cancel key.
     ///
-    /// ``isValid`` is deliberately `false` for this combination — it must never be selectable as
-    /// the persistent capture shortcut, because a modifier-less hot key swallows ordinary typing
-    /// system-wide. Claiming it therefore requires an explicit opt-in, and it is held only for the
-    /// length of one countdown-plus-recording. See `TransientHotKeyClaim`.
+    /// ``isValid`` is deliberately `false` for this combination — Escape is not on
+    /// ``bareKeyAllowList``, so it can never be selected as a persistent shortcut. Claiming it
+    /// requires an explicit opt-in, and it is held only for the length of one
+    /// countdown-plus-recording. See `TransientHotKeyClaim`.
     public static let bareEscape = HotKeyCombo(keyCode: 53, carbonModifiers: 0)
 
-    /// TriCap's default: Option+Shift+5, chosen to sit next to the system ⇧⌘5 without colliding.
+    /// TriCap's default *capture* shortcut: Option+Shift+5, chosen to sit next to the system
+    /// ⇧⌘5 without colliding.
     public static let `default` = HotKeyCombo(
         keyCode: 23,  // kVK_ANSI_5
         carbonModifiers: CarbonModifier.option.rawValue | CarbonModifier.shift.rawValue
     )
+
+    /// TriCap's default *pin* shortcut: a bare F3.
+    ///
+    /// F3 is Mission Control's factory binding on Apple keyboards. macOS resolves that in the
+    /// user's favour — whoever registered first keeps it — so TriCap detects a failed registration
+    /// and says so rather than quietly moving to another key. See `HotKeyRegistrationPolicy`.
+    public static let defaultPin = HotKeyCombo(keyCode: 99, carbonModifiers: 0)  // kVK_F3
 
     /// Virtual-key → label for an ANSI layout.
     ///
@@ -82,6 +115,8 @@ public struct HotKeyCombo: Codable, Equatable, Hashable, Sendable {
         96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8", 101: "F9",
         103: "F11", 109: "F10", 111: "F12",
         118: "F4", 120: "F2", 122: "F1",
+        105: "F13", 107: "F14", 113: "F15", 106: "F16",
+        64: "F17", 79: "F18", 80: "F19", 90: "F20",
         123: "←", 124: "→", 125: "↓", 126: "↑",
     ]
 }

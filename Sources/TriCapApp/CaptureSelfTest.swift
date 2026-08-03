@@ -68,6 +68,29 @@ enum CaptureSelfTest {
         print("  SKIP  \(label)  — not verified in this run: \(reason)")
     }
 
+    /// Run the main run loop for a while.
+    ///
+    /// `--selftest` never calls `NSApp.run()`, so AppKit's run-loop observers — the ones that
+    /// finish tearing down a window that was actually put on screen — otherwise never fire.
+    private static func spinRunLoop(seconds: Double) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+    }
+
+    /// A plain opaque sRGB image, for exercising paths that just need *some* bitmap.
+    private static func solidImage(width: Int, height: Int) -> CGImage? {
+        guard let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(srgbRed: 0.2, green: 0.5, blue: 0.9, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
     private static func section(_ title: String) {
         print("\n== \(title)")
     }
@@ -656,26 +679,26 @@ enum CaptureSelfTest {
 
         var cancelFired = 0
         let escapeClaimed = GlobalHotKeyMonitor.shared.register(
-            .bareEscape, in: .recordingCancel, allowingNoModifiers: true
+            .bareEscape, in: .escapeDismiss, allowingNoModifiers: true
         ) { cancelFired += 1 }
         check("a bare Escape can be claimed system-wide without Accessibility", escapeClaimed)
         check("claiming Escape leaves the capture shortcut registered",
               GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == primaryCombo,
               detail: GlobalHotKeyMonitor.shared.combo(in: .primaryCapture)?.displayString ?? "nil")
         check("the two slots hold different combinations",
-              GlobalHotKeyMonitor.shared.combo(in: .recordingCancel) == .bareEscape)
+              GlobalHotKeyMonitor.shared.combo(in: .escapeDismiss) == .bareEscape)
 
-        GlobalHotKeyMonitor.shared.unregister(.recordingCancel)
+        GlobalHotKeyMonitor.shared.unregister(.escapeDismiss)
         check("releasing Escape does not release the capture shortcut",
-              !GlobalHotKeyMonitor.shared.isRegistered(.recordingCancel)
+              !GlobalHotKeyMonitor.shared.isRegistered(.escapeDismiss)
                   && GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == primaryCombo)
 
         // Re-claiming after release must work, because every recording does it.
         let reclaimed = GlobalHotKeyMonitor.shared.register(
-            .bareEscape, in: .recordingCancel, allowingNoModifiers: true
+            .bareEscape, in: .escapeDismiss, allowingNoModifiers: true
         ) { cancelFired += 1 }
         check("Escape can be re-claimed for the next recording", reclaimed)
-        GlobalHotKeyMonitor.shared.unregister(.recordingCancel)
+        GlobalHotKeyMonitor.shared.unregister(.escapeDismiss)
 
         // The countdown claims Escape, then the recording rebinds it in place. Re-registering the
         // same combination would fail with eventHotKeyExistsErr, so the hand-off must not do that.
@@ -684,21 +707,21 @@ enum CaptureSelfTest {
             combo: .bareEscape,
             register: { combo, action in
                 GlobalHotKeyMonitor.shared.register(
-                    combo, in: .recordingCancel, allowingNoModifiers: true, action: action
+                    combo, in: .escapeDismiss, allowingNoModifiers: true, action: action
                 )
             },
-            unregister: { GlobalHotKeyMonitor.shared.unregister(.recordingCancel) }
+            unregister: { GlobalHotKeyMonitor.shared.unregister(.escapeDismiss) }
         )
         check("countdown claims Escape", handoffClaim.claim { handoffCancels += 1 })
         check("recording rebinds the same claim without re-registering",
               handoffClaim.claim { handoffCancels += 2 } && handoffClaim.registrationCount == 1,
               detail: "registrations=\(handoffClaim.registrationCount)")
         check("the claim is still live across the hand-off",
-              GlobalHotKeyMonitor.shared.isRegistered(.recordingCancel))
+              GlobalHotKeyMonitor.shared.isRegistered(.escapeDismiss))
         handoffClaim.release()
         handoffClaim.release()
         check("release is idempotent and gives the key back",
-              handoffClaim.releaseCount == 1 && !GlobalHotKeyMonitor.shared.isRegistered(.recordingCancel),
+              handoffClaim.releaseCount == 1 && !GlobalHotKeyMonitor.shared.isRegistered(.escapeDismiss),
               detail: "releases=\(handoffClaim.releaseCount)")
 
         check("a modifier-less combination is refused for the configurable shortcut",
@@ -708,7 +731,159 @@ enum CaptureSelfTest {
         GlobalHotKeyMonitor.shared.unregisterAll()
         check("all hot keys released at the end of the run",
               GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == nil
-                  && GlobalHotKeyMonitor.shared.combo(in: .recordingCancel) == nil)
+                  && GlobalHotKeyMonitor.shared.combo(in: .escapeDismiss) == nil)
+
+        // ---- Pin shortcut --------------------------------------------------------------------
+        section("Pin hot key (F3)")
+        // The pin key is a separate slot from the capture key, and it is the one most likely to
+        // collide: F3 is Mission Control's factory binding. This registers both for real and
+        // reports which of the two outcomes this machine actually produces.
+        let pinCombo = HotKeyCombo.defaultPin
+        check("F3 is on the bare-key allow list", pinCombo.isValid && !pinCombo.hasModifier,
+              detail: pinCombo.displayString)
+
+        _ = GlobalHotKeyMonitor.shared.register(primaryCombo, in: .primaryCapture) { primaryFired += 1 }
+        var pinFired = 0
+        let pinClaimed = GlobalHotKeyMonitor.shared.register(
+            pinCombo, in: .pinFromClipboard, allowingNoModifiers: true
+        ) { pinFired += 1 }
+
+        if pinClaimed {
+            check("the pin shortcut registers alongside the capture shortcut", true,
+                  detail: "\(primaryCombo.displayString) + \(pinCombo.displayString)")
+        } else {
+            // Not a test failure: it is the conflict path, and the app surfaces it as a rebindable
+            // error rather than silently substituting another key.
+            print("  NOTE  F3 is already taken on this machine (Mission Control keeps it by "
+                  + "default). The app reports this and asks for another key.")
+        }
+        check("the capture shortcut survives whatever the pin shortcut did",
+              GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == primaryCombo)
+
+        // Carbon refuses a second registration of the same combination. That refusal is what makes
+        // conflict detection real rather than assumed, so assert it rather than trusting it.
+        check("registering the same combination twice is refused",
+              !GlobalHotKeyMonitor.shared.register(primaryCombo, in: .pinFromClipboard) {})
+
+        // Restore whatever the duplicate attempt cleared, then prove independent release.
+        if pinClaimed {
+            _ = GlobalHotKeyMonitor.shared.register(
+                pinCombo, in: .pinFromClipboard, allowingNoModifiers: true
+            ) { pinFired += 1 }
+            GlobalHotKeyMonitor.shared.unregister(.pinFromClipboard)
+            check("releasing the pin shortcut leaves the capture shortcut alone",
+                  !GlobalHotKeyMonitor.shared.isRegistered(.pinFromClipboard)
+                      && GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == primaryCombo)
+        }
+        GlobalHotKeyMonitor.shared.unregisterAll()
+
+        // ---- Pin lifecycle -------------------------------------------------------------------
+        section("Pin windows")
+        // The whole section runs inside one pool: putting a window on screen autoreleases it from
+        // several places inside AppKit, and `--selftest` has no outer pool draining regularly, so
+        // the deallocation check below would otherwise be measuring pending autoreleases rather
+        // than ownership.
+        weak var weakPin: PinWindow?
+        autoreleasepool {
+            let pinboard = PinboardController(
+                limits: PinLimits(maxCount: 2, maxTotalPixels: 4_000_000, maxSinglePixels: 3_000_000),
+                settingsProvider: { AppSettings() }
+            )
+            let board = NSPasteboard(name: .init("app.tricap.selftest.pin"))
+
+            // Nothing on the clipboard: a pin must not be created, and the reason must be the
+            // "empty" one rather than "not an image".
+            board.clearContents()
+            check("an empty clipboard creates no pin",
+                  {
+                      if case .nothingToPin(.empty) = pinboard.pinFromClipboard(board) { return true }
+                      return false
+                  }(),
+                  detail: "pins=\(pinboard.pinCount)")
+            check("no window was created for an empty clipboard", pinboard.pinCount == 0)
+
+            // Text only: still no pin, but a different message.
+            board.clearContents()
+            board.setString("not an image", forType: .string)
+            check("a text clipboard creates no pin",
+                  {
+                      if case .nothingToPin(.unsupportedContent) = pinboard.pinFromClipboard(board) {
+                          return true
+                      }
+                      return false
+                  }())
+
+            // A real image: this creates a real NSPanel.
+            board.clearContents()
+            if let pinImage = solidImage(width: 320, height: 240),
+               let pinPNG = ImageProcessing.pngData(from: pinImage) {
+                board.setData(pinPNG, forType: .png)
+            } else {
+                check("built a test image for pinning", false)
+            }
+
+            check("a PNG on the clipboard produces a pin", pinboard.pinFromClipboard(board).isSuccess)
+            check("pinning twice produces two independent pins",
+                  pinboard.pinFromClipboard(board).isSuccess && pinboard.pinCount == 2,
+                  detail: "pins=\(pinboard.pinCount)")
+
+            check("the pin count ceiling refuses the third",
+                  {
+                      if case .refused(.tooManyPins) = pinboard.pinFromClipboard(board) { return true }
+                      return false
+                  }(),
+                  detail: "pins=\(pinboard.pinCount)")
+
+            // The windows must be real, on screen, and must never have taken key focus.
+            //
+            // The inspection is scoped so the array of windows is gone before teardown — otherwise
+            // the weak check below would only be measuring this function's own strong reference.
+            autoreleasepool {
+                let visible = NSApp.windows.compactMap { $0 as? PinWindow }.filter(\.isVisible)
+                check("both pins are real visible windows", visible.count == 2, detail: "\(visible.count)")
+                check("no pin ever became the key window",
+                      !visible.contains { $0.isKeyWindow } && NSApp.keyWindow as? PinWindow == nil)
+                check("pins float above ordinary windows but below the security layer",
+                      visible.allSatisfy {
+                          $0.level.rawValue > NSWindow.Level.normal.rawValue
+                              && $0.level.rawValue < NSWindow.Level.screenSaver.rawValue
+                      },
+                      detail: visible.map { "\($0.level.rawValue)" }.joined(separator: ","))
+                check("pins follow the user across Spaces and full-screen apps",
+                      visible.allSatisfy {
+                          $0.collectionBehavior.contains(.canJoinAllSpaces)
+                              && $0.collectionBehavior.contains(.fullScreenAuxiliary)
+                      })
+                weakPin = visible.first
+            }
+
+            // Teardown has to release the windows *and* the bitmaps they hold.
+            pinboard.closeAll()
+            check("closeAll() closes every pin", pinboard.pinCount == 0 && !pinboard.hasPins)
+            pinboard.closeAll()   // idempotent
+            check("closing an empty pinboard again is harmless", pinboard.pinCount == 0)
+            check("no pin windows are left in the application",
+                  !NSApp.windows.contains { $0 is PinWindow && $0.isVisible })
+
+            // The bitmap is the part that costs megabytes, and dropping it must not depend on when
+            // AppKit gets round to freeing the window shell.
+            check("teardown released the pinned bitmap", weakPin?.image == nil,
+                  detail: weakPin == nil ? "window gone too" : "window shell still held by AppKit")
+            check("teardown released the content view", weakPin?.contentView == nil)
+            check("teardown left no visible pin window", weakPin?.isVisible != true)
+
+            autoreleasepool { spinRunLoop(seconds: 0.3) }
+
+            board.clearContents()
+        }
+        autoreleasepool {}
+
+        // Not asserted: AppKit keeps a window that has been on screen alive past `close()` for its
+        // own bookkeeping, and a TriCap-free NSPanel behaves identically in this harness (see
+        // scripts/diagnostics/panel-lifetime-probe.swift). Whether the shell has gone yet is
+        // therefore AppKit's business; what TriCap owns is released above, deterministically.
+        print("  NOTE  pin window shell after teardown: "
+              + (weakPin == nil ? "deallocated" : "still held by AppKit (bitmap already released)"))
 
         // ---- Editor window lifecycle -------------------------------------------------------
         section("Editor window lifecycle")

@@ -41,17 +41,35 @@ public final class RegionSelector {
 
     private var mode: CaptureMode = .still
     private var anchor: CGPoint?
+    private var gesture: SelectionGesture?
+
+    /// Windows the user may click to capture, snapshotted once when the overlay opens.
+    ///
+    /// Polling the window server on every mouse-move would be far too slow; a list taken at open
+    /// time is also what the user sees, because the overlay covers everything anyway.
+    private var candidates: [WindowCandidate] = []
+    private var highlighted: WindowCandidate?
+    /// Edges the drag snaps to: every candidate window plus every display.
+    private var snapEdges: [CGRect] = []
     private var continuation: CheckedContinuation<Outcome, Never>?
     private var previouslyActiveApp: NSRunningApplication?
 
     public init() {}
 
     /// Present the picker and wait for the user to choose a region or cancel.
-    public func selectRegion(initialMode: CaptureMode) async -> Outcome {
+    /// - Parameter windowCandidates: selectable windows, front to back. Empty disables
+    ///   click-to-capture-window and leaves only free-form dragging, which is the correct
+    ///   degradation when the window list cannot be read.
+    public func selectRegion(
+        initialMode: CaptureMode,
+        windowCandidates: [WindowCandidate] = []
+    ) async -> Outcome {
         let displays = DisplaySurvey.currentDisplays()
         guard !displays.isEmpty else { return .cancelled }
         self.displays = displays
         self.mode = initialMode
+        self.candidates = windowCandidates
+        self.snapEdges = windowCandidates.map(\.frame) + displays.map(\.appKitBounds)
 
         // Remember who was in front so a cancelled capture puts focus back where it was.
         previouslyActiveApp = NSWorkspace.shared.frontmostApplication
@@ -131,6 +149,7 @@ public final class RegionSelector {
     }
 
     private func broadcast(selection: CGRect?) {
+        // A nil selection means "nothing dragged yet"; the overlay then shows the window highlight.
         var pixelSize: CGSize?
         if let selection,
            let display = DisplaySurvey.displayWithLargestOverlap(of: selection, in: displays),
@@ -152,14 +171,29 @@ public final class RegionSelector {
 
 extension RegionSelector: SelectionOverlayDelegate {
 
-    func overlayDidBeginDrag(at point: CGPoint) {
-        anchor = point
-        broadcast(selection: CGRect(from: point, to: point))
+    func overlayDidHover(at point: CGPoint) {
+        // Only while no drag is in progress; a highlight competing with a live selection is noise.
+        guard anchor == nil else { return }
+        updateHighlight(at: point)
     }
 
-    func overlayDidDrag(to point: CGPoint) {
+    func overlayDidBeginDrag(at point: CGPoint) {
+        anchor = point
+        gesture = SelectionGesture(origin: point)
+        // Keep the highlight up: until the pointer passes the drag threshold this is still a click.
+        broadcast(selection: nil)
+    }
+
+    func overlayDidDrag(to point: CGPoint, snapping: Bool) {
         guard let anchor else { return }
-        broadcast(selection: CGRect(from: anchor, to: point))
+        gesture?.update(to: point)
+
+        // Below the threshold the press is still a window click, so nothing is drawn as a region.
+        guard gesture?.mode == .dragging else { return }
+        clearHighlight()
+
+        let raw = CGRect(from: anchor, to: point)
+        broadcast(selection: SnapEngine.snap(rect: raw, to: snapEdges, enabled: snapping))
     }
 
     func overlayDidEndDrag(at point: CGPoint) {
@@ -167,8 +201,26 @@ extension RegionSelector: SelectionOverlayDelegate {
             finish(.cancelled)
             return
         }
-        let rect = CGRect(from: anchor, to: point)
+        let isClick = gesture?.mode != .dragging
         self.anchor = nil
+        self.gesture = nil
+
+        // A click on a highlighted window captures that window.
+        if isClick, let window = highlighted,
+           let display = DisplaySurvey.displayWithLargestOverlap(of: window.frame, in: displays),
+           let region = CaptureRegion(appKitGlobalRect: window.frame, display: display) {
+            TriCapLog.selection.info(
+                "captured window \(window.id, privacy: .public) \(Int(region.displayPixelRect.width), privacy: .public)x\(Int(region.displayPixelRect.height), privacy: .public)px"
+            )
+            finish(.selected(region, mode))
+            return
+        }
+
+        let rect = SnapEngine.snap(
+            rect: CGRect(from: anchor, to: point),
+            to: snapEdges,
+            enabled: !NSEvent.modifierFlags.contains(.option)
+        )
 
         // A click without a drag means "changed my mind", not "capture a 0x0 region".
         guard rect.width >= 1, rect.height >= 1,
@@ -194,6 +246,34 @@ extension RegionSelector: SelectionOverlayDelegate {
     func overlayDidRequestMode(_ requested: CaptureMode?) {
         mode = requested ?? mode.toggled
         applyMode()
+    }
+
+    // MARK: - Window highlight
+
+    private func updateHighlight(at point: CGPoint) {
+        let window = WindowPicker.window(at: point, in: candidates, ownBundleIdentifier: Bundle.main.bundleIdentifier)
+        guard window?.id != highlighted?.id else { return }
+        highlighted = window
+
+        var pixelSize: CGSize?
+        if let window,
+           let display = DisplaySurvey.displayWithLargestOverlap(of: window.frame, in: displays),
+           let region = CaptureRegion(appKitGlobalRect: window.frame, display: display) {
+            pixelSize = region.nativePixelSize
+        }
+        for view in views {
+            view.highlightedWindow = window?.frame
+            view.highlightedWindowPixelSize = pixelSize
+        }
+    }
+
+    private func clearHighlight() {
+        guard highlighted != nil else { return }
+        highlighted = nil
+        for view in views {
+            view.highlightedWindow = nil
+            view.highlightedWindowPixelSize = nil
+        }
     }
 }
 

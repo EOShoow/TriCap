@@ -5,7 +5,10 @@ import TriCapKit
 @MainActor
 protocol SelectionOverlayDelegate: AnyObject {
     func overlayDidBeginDrag(at point: CGPoint)
-    func overlayDidDrag(to point: CGPoint)
+    /// `snapping` is `false` while the user holds Option.
+    func overlayDidDrag(to point: CGPoint, snapping: Bool)
+    /// Pointer moved with no button down: update the window highlight.
+    func overlayDidHover(at point: CGPoint)
     func overlayDidEndDrag(at point: CGPoint)
     func overlayDidCancel()
     /// `nil` toggles; an explicit value selects that mode.
@@ -35,6 +38,17 @@ public final class SelectionOverlayView: NSView {
         didSet { if oldValue != isRecordingMode { needsDisplay = true } }
     }
 
+    /// The window under the pointer, in AppKit global points. Drawn as a highlight while the user
+    /// has not started dragging: one click captures it.
+    public var highlightedWindow: CGRect? {
+        didSet { if oldValue != highlightedWindow { needsDisplay = true } }
+    }
+
+    /// Pixel size of ``highlightedWindow``, for its readout.
+    public var highlightedWindowPixelSize: CGSize? {
+        didSet { if oldValue != highlightedWindowPixelSize { needsDisplay = true } }
+    }
+
     public override init(frame frameRect: NSRect) { super.init(frame: frameRect) }
     public required init?(coder: NSCoder) { super.init(coder: coder) }
 
@@ -55,7 +69,10 @@ public final class SelectionOverlayView: NSView {
         // the explanatory line vanished the moment the mouse went down.
         drawModeBanner(in: context)
 
-        guard let selection = globalSelection else { return }
+        guard let selection = globalSelection else {
+            drawWindowHighlight(in: context)
+            return
+        }
 
         let local = convertFromGlobal(selection)
         let visible = local.intersection(bounds)
@@ -78,6 +95,35 @@ public final class SelectionOverlayView: NSView {
         drawReleaseHint(near: visible, in: context)
     }
 
+    /// The window that a single click would capture.
+    ///
+    /// Drawn only before a drag starts: once the user is dragging a region, showing a competing
+    /// rectangle would be noise.
+    private func drawWindowHighlight(in context: CGContext) {
+        guard let window = highlightedWindow else { return }
+        let local = convertFromGlobal(window).intersection(bounds)
+        guard !local.isNull, local.width > 1, local.height > 1 else { return }
+
+        // Lift the window out of the dimming layer so the user sees what they are about to take.
+        context.setBlendMode(.copy)
+        context.setFillColor(NSColor.black.withAlphaComponent(0.12).cgColor)
+        context.fill(local)
+        context.setBlendMode(.normal)
+
+        context.setStrokeColor(accentColor.withAlphaComponent(0.9).cgColor)
+        context.setLineWidth(2)
+        context.stroke(local.insetBy(dx: 1, dy: 1))
+        drawCorners(of: local, in: context)
+
+        if let pixelSize = highlightedWindowPixelSize {
+            drawBadge(
+                "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px  ·  click to capture",
+                near: local,
+                in: context
+            )
+        }
+    }
+
     private var accentColor: NSColor {
         isRecordingMode ? .systemRed : .controlAccentColor
     }
@@ -85,7 +131,9 @@ public final class SelectionOverlayView: NSView {
     /// `● Recording   R screenshot · Esc cancel` — pinned to the top of every display.
     private func drawModeBanner(in context: CGContext) {
         let title = isRecordingMode ? "Record a clip" : "Take a screenshot"
-        let hint = isRecordingMode ? "S  screenshot     Esc  cancel" : "R  record     Esc  cancel"
+        let hint = isRecordingMode
+            ? "Click a window or drag     S  screenshot     Esc  cancel"
+            : "Click a window or drag     R  record     Esc  cancel"
 
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
@@ -182,8 +230,11 @@ public final class SelectionOverlayView: NSView {
     /// `1280 × 800 px` badge pinned just outside the selection.
     private func drawReadout(near rect: CGRect, in context: CGContext) {
         guard let pixelSize = selectionPixelSize, pixelSize.width >= 1, pixelSize.height >= 1 else { return }
+        drawBadge("\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px", near: rect, in: context)
+    }
 
-        let text = "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px" as NSString
+    private func drawBadge(_ string: String, near rect: CGRect, in context: CGContext) {
+        let text = string as NSString
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: NSColor.white,
@@ -224,11 +275,29 @@ public final class SelectionOverlayView: NSView {
     }
 
     override public func mouseDragged(with event: NSEvent) {
-        delegate?.overlayDidDrag(to: globalPoint(for: event))
+        delegate?.overlayDidDrag(to: globalPoint(for: event), snapping: !event.modifierFlags.contains(.option))
     }
 
     override public func mouseUp(with event: NSEvent) {
         delegate?.overlayDidEndDrag(at: globalPoint(for: event))
+    }
+
+    override public func mouseMoved(with event: NSEvent) {
+        delegate?.overlayDidHover(at: globalPoint(for: event))
+    }
+
+    /// The overlay covers the whole screen, so it needs an explicit tracking area to receive
+    /// `mouseMoved` — that is what drives the window highlight.
+    override public func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(
+            NSTrackingArea(
+                rect: bounds,
+                options: [.activeAlways, .mouseMoved, .inVisibleRect],
+                owner: self
+            )
+        )
     }
 
     override public func rightMouseDown(with event: NSEvent) {

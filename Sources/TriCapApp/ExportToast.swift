@@ -76,6 +76,49 @@ final class ExportToastPresenter {
         TriCapLog.app.info("export toast: \(summary.fileName, privacy: .public) — \(summary.clipboardDescription ?? "nothing copied", privacy: .public)")
     }
 
+    /// A one-line notice with no file behind it — "pinned", "the clipboard has no image".
+    ///
+    /// Shares the toast's placement and auto-dismiss so every transient message in TriCap appears
+    /// in the same corner, but carries no thumbnail and no Show-in-Finder action because there is
+    /// nothing to reveal.
+    func showNotice(_ message: String, systemImage: String, isWarning: Bool) {
+        dismiss()
+
+        let hosting = NSHostingView(rootView: NoticeView(message: message, systemImage: systemImage, isWarning: isWarning))
+        hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: 1)
+        hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: max(52, hosting.fittingSize.height))
+
+        let panel = makePanel(contentView: hosting)
+        position(panel)
+        panel.orderFrontRegardless()
+        window = panel
+
+        let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.dismiss() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dismissTimer = timer
+    }
+
+    private func makePanel(contentView: NSView) -> NSPanel {
+        let panel = NSPanel(
+            contentRect: contentView.frame,
+            styleMask: [.nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = contentView
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.sharingType = .none
+        panel.hidesOnDeactivate = false
+        return panel
+    }
+
     func dismiss() {
         dismissTimer?.invalidate()
         dismissTimer = nil
@@ -204,5 +247,30 @@ struct ExportToastPreview: View {
     var body: some View {
         ToastView(summary: summary, thumbnail: nil, onReveal: {}, onDismiss: {})
             .padding(10)
+    }
+}
+
+/// A transient one-line message with no artefact behind it.
+private struct NoticeView: View {
+    let message: String
+    let systemImage: String
+    let isWarning: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .foregroundStyle(isWarning ? Color.orange : Color.accentColor)
+            Text(message)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08))
+        )
     }
 }

@@ -8,6 +8,13 @@
 	<string>TriCap</string>
 	<key>CFBundleIdentifier</key>
 	<string>app.tricap.TriCap</string>
+	<!--
+	  Finder, Get Info and System Settings only. The menu-bar item deliberately stays a monochrome
+	  SF Symbol template so it tints with the menu bar; it never uses this full-colour icon.
+	  build-app.sh copies TriCap.icns into Contents/Resources before signing.
+	-->
+	<key>CFBundleIconFile</key>
+	<string>TriCap</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

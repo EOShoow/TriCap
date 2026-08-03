@@ -12,8 +12,8 @@ import TriCapKit
 /// parameters behind it for the people who do.
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
-    @State private var hotKeyCapture = false
     @State private var hotKeyError: String?
+    @State private var pinHotKeyError: String?
     @State private var showAdvancedQuality: Bool
 
     /// Injected by the app so the About tab can reopen the welcome window.
@@ -36,7 +36,10 @@ struct SettingsView: View {
             outputTab.tabItem { Label("Output", systemImage: "square.and.arrow.down") }
             aboutTab.tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 540, height: 470)
+        // Tall enough that the General tab — two shortcuts, the post-screenshot action, the
+        // countdown and the permission row — fits without scrolling. The Form still scrolls if a
+        // longer explanation wraps, but nothing important should need hunting for.
+        .frame(width: 540, height: 700)
     }
 
     // MARK: - General
@@ -45,22 +48,53 @@ struct SettingsView: View {
         Form {
             Section {
                 HStack {
-                    Text("Shortcut")
+                    Text("Screenshot")
                     Spacer()
                     HotKeyRecorder(
                         combo: $store.settings.hotKey,
-                        isRecording: $hotKeyCapture,
                         errorMessage: $hotKeyError
                     )
                 }
                 if let hotKeyError {
                     Text(hotKeyError).font(.caption).foregroundStyle(.red)
                 }
-                Text("Press it anywhere to pick a region. In the picker: **R** switches to recording, **S** back to a screenshot, **Esc** cancels.")
+                Text("Opens the region picker. **Click a window** to capture it, or drag out any area — hold **⌥** while dragging to ignore edge snapping. **R** switches to recording, **S** back to a screenshot, **Esc** cancels.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Global shortcut")
+                Text("Screenshot shortcut")
+            }
+
+            Section {
+                HStack {
+                    Text("Pin")
+                    Spacer()
+                    HotKeyRecorder(
+                        combo: $store.settings.pinHotKey,
+                        errorMessage: $pinHotKeyError
+                    )
+                }
+                if let pinHotKeyError {
+                    Text(pinHotKeyError).font(.caption).foregroundStyle(.red)
+                }
+                Text("Pins whatever image is on the clipboard as a floating window that stays above other apps. **Esc** closes the front one. On Apple keyboards **F3** is Mission Control by default — if TriCap cannot claim it, it says so and keeps working from the menu.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Pin shortcut")
+            }
+
+            Section {
+                Picker("After a screenshot", selection: $store.settings.stillCaptureAction) {
+                    ForEach(StillCaptureAction.allCases) { action in
+                        Text(action.displayName).tag(action)
+                    }
+                }
+                Text(store.settings.stillCaptureAction.summary)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Screenshots")
             }
 
             Section {
@@ -393,14 +427,13 @@ enum OutputFileWriterPreview {
 /// Captures the next key press and turns it into a ``HotKeyCombo``.
 private struct HotKeyRecorder: NSViewRepresentable {
     @Binding var combo: HotKeyCombo
-    @Binding var isRecording: Bool
     @Binding var errorMessage: String?
 
     func makeNSView(context: Context) -> HotKeyRecorderView {
         let view = HotKeyRecorderView()
         view.onCapture = { newCombo in
             guard let newCombo else {
-                errorMessage = "A shortcut needs at least one of ⌘ ⌥ ⌃ ⇧."
+                errorMessage = "A shortcut needs one of ⌘ ⌥ ⌃ ⇧, or a function key on its own."
                 return
             }
             errorMessage = nil

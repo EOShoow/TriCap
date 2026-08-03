@@ -40,12 +40,12 @@ CaptureCore  SelectionUI  AnnotationCore  →  ExportCore
 | Target | Responsibility |
 |---|---|
 | `CWebP` | Vendored libwebp: dec, demux, dsp, enc, mux, utils, sharpyuv. One hand-written module map exposing only the public headers TriCap uses. |
-| `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging. |
-| `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, the `RecordingSession` lifecycle and its `CaptureSessionGate`, clip trimming and WebP timeline construction. |
-| `SelectionUI` | The cross-display selection overlay: one borderless shielding-level window per screen, one shared global selection rect, `R`/`S` mode switching, `Esc`/right-click cancel. |
+| `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging — plus the pure logic behind window-aware selection (`WindowPicker`, `SelectionGesture`, `SnapEngine`) and pinning (`PinLimits`, `PinPlacement`, `PinZoom`, `PinOpacity`, `PriorityHotKeyClaim`). |
+| `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, the `RecordingSession` lifecycle and its `CaptureSessionGate`, `WindowSurvey`, clip trimming and WebP timeline construction. |
+| `SelectionUI` | The cross-display selection overlay: one borderless shielding-level window per screen, one shared global selection rect, window highlighting under the pointer, `R`/`S` mode switching, `Esc`/right-click cancel. |
 | `AnnotationCore` | Annotation model (`AnnotationItem`, `AnnotationShape`, `AnnotationStyle`), the snapshot-based `AnnotationDocument` with bounded undo/redo, and `AnnotationRenderer`. |
-| `ExportCore` | `WebPCodec` (the libwebp bridge), `StillImageCodec` + `MagicBytes`, `OutputFileWriter`, `MarkdownReference`, and `ExportService` which renders → encodes → writes → **re-reads and verifies**. |
-| `TriCapApp` | Menu-bar item, global hot key, settings, editor, recording HUD, capture orchestration, plus two headless entry points (`--selftest`, `--render-ui-snapshots`). |
+| `ExportCore` | `WebPCodec` (the libwebp bridge), `StillImageCodec` + `MagicBytes`, `OutputFileWriter`, `MarkdownReference`, `PasteboardImage`, and `ExportService` which renders → encodes → writes → **re-reads and verifies**. |
+| `TriCapApp` | Menu-bar item, global hot keys, settings, editor, recording HUD, pin windows (`PinWindow`, `PinboardController`), capture orchestration, plus two headless entry points (`--selftest`, `--render-ui-snapshots`). |
 
 ### Deviations from the suggested structure, and why
 
@@ -134,6 +134,20 @@ cancels.
 The trade is explicit: while a recording runs (at most `RecordingLimits.maxDuration`), Escape is
 intercepted system-wide. If another application already owns a bare Escape hot key, the HUD says
 so instead of pretending Escape is wired up.
+
+### Two features, one Escape
+
+Pinning wants the same key: a pin parked over another application has to be dismissable without
+hunting for TriCap. Carbon will not register the same combination twice, so a recording started
+while a pin was open would have failed to claim Escape — and recording cancellation, the more
+urgent of the two, would have been the one to lose.
+
+`PriorityHotKeyClaim` resolves that with one registration and a *stack* of handlers. Pushing
+returns a token; the top of the stack receives the key; popping a token — in any order — hands the
+key back to whoever is underneath, and the registration is released only when the stack empties.
+So a pin claims Escape, a recording pushes on top of it and takes Escape for its duration, and when
+the recording ends the pin gets Escape back. `SharedEscapeKey` holds the single process-wide claim,
+and both `RecordingChromeController` and `PinboardController` go through it.
 
 ## Quality presets
 
@@ -329,14 +343,56 @@ the model are both nil.
 `RegisterEventHotKey` (Carbon) rather than an `NSEvent` global monitor: a global monitor needs
 Accessibility permission — a second, scarier TCC prompt on top of Screen Recording — and cannot
 stop the key reaching the focused app. Carbon's hot-key API remains the only public way to claim a
-system-wide combination without that permission. A modifier-less combination is refused for the
-*configurable* shortcut (it would swallow ordinary typing); only the transient recording-cancel
-slot opts in via `allowingNoModifiers`.
+system-wide combination without that permission.
+
+A modifier-less hot key is swallowed everywhere, so binding one to an ordinary key would make that
+character untypeable in every application. `HotKeyCombo.bareKeyAllowList` is therefore *exactly*
+the function row, F1–F20 — enumerated key codes, not a range test, so a letter can never slip in.
+That is what lets the pin shortcut default to a bare `F3` while `⌥⇧5` keeps its modifiers, and the
+transient Escape claim still opts in separately via `allowingNoModifiers`.
 
 Claiming a new combination requires releasing the old one first, so a rejected new shortcut used
 to leave TriCap with no working shortcut at all. `HotKeyRegistrationPolicy` (a pure function, so
 the behaviour is testable without Carbon) now rolls back to the previous combination, the app
-reverts the stored setting to match, and the user is told which shortcut is actually live.
+reverts the stored setting to match, and the user is told which shortcut is actually live. The
+screenshot and pin shortcuts run that policy **independently**, in separate slots: `F3` is Mission
+Control's factory binding and is the registration most likely to fail, and it must not be able to
+take `⌥⇧5` down with it. A failure is reported — naming Mission Control — and the key stays
+re-bindable; TriCap never silently substitutes a different one.
+
+## Pinning
+
+A pin is an `NSPanel` at `.floating` — deliberately *not* the `CGShieldingWindowLevel()` the
+selection overlay uses. A pin is content the user parked somewhere and then forgot about; it must
+never be able to sit over a password prompt, a permission sheet or the login window. It is a
+`.nonactivatingPanel` with `canBecomeKey == false` and is shown with `orderFrontRegardless()`
+rather than `makeKeyAndOrderFront`, so pinning a reference never interrupts typing, and
+`[.canJoinAllSpaces, .fullScreenAuxiliary]` keeps it in view as the user moves between Spaces.
+
+Teardown does not wait for `dealloc`. AppKit keeps a window that has been on screen alive past
+`close()` for its own bookkeeping — reproducible with a `NSPanel` and no TriCap code at all, see
+[scripts/diagnostics/panel-lifetime-probe.swift](scripts/diagnostics/panel-lifetime-probe.swift) —
+and a pin holds a full-resolution screenshot. `PinWindow.tearDown()` therefore drops the bitmap,
+the image view and the delegate explicitly and is idempotent, so the megabytes come back when the
+user closes the pin rather than whenever AppKit gets round to it. `PinLimits` bounds the rest:
+twelve pins, 40 MP each, 120 MP in total, refused with a sentence that says which ceiling was hit.
+
+## Window-aware selection
+
+Hovering highlights the topmost selectable window and a click captures it; dragging past 6 pt
+(radially, and stickily — dragging back to the origin does not turn a region into a window click)
+switches to a free region. `WindowSurvey` asks ScreenCaptureKit for the window list and converts
+each `SCWindow.frame` from Quartz to AppKit points through the same `CoordinateConverter` as
+everything else; if the list is unavailable it returns empty and the overlay degrades to plain
+drag selection rather than failing.
+
+The decisions themselves are pure functions in `TriCapKit` so they can be tested without a screen:
+`WindowPicker` (exclusions — TriCap's own windows, off-screen, `level > 0` system layers,
+degenerate sizes — and overlap resolved by stacking order), `SelectionGesture` (the click/drag
+threshold), and `SnapEngine` (8 pt edge snapping, disabled by holding Option). `SnapEngine` snaps
+each axis independently: a short selection near a display edge can have both of its horizontal
+sides inside the threshold of the same line, and collapsing that axis must not also cancel a
+perfectly good snap on the other one.
 
 ## Selection overlay
 
@@ -356,3 +412,23 @@ the overlay nor the recording HUD can end up inside a capture.
 Both exist because the interactive flow needs a human at the keyboard while everything downstream
 of "the user dragged a rectangle" can be verified unattended — and because a reviewer needs one
 reproducible command.
+
+## App icon
+
+[scripts/generate-icon.swift](scripts/generate-icon.swift) *is* the icon source. There is no
+binary design file and no downloaded art anywhere in the repository: every shape is a Core
+Graphics path with numbers that show up in a diff, and the whole set — 1024 px master, the
+`.iconset`, and light/dark contact sheets at 16/32/128/256/512/1024 px — regenerates from one
+command. `iconutil` turns the iconset into `Resources/AppIcon/TriCap.icns`.
+
+The mark is a viewfinder: four corner brackets around an open centre, on a deep-navy-to-azure
+vertical gradient, with a single small coral shutter dot at the optical centre — the one warm
+colour, and what makes it read as a camera rather than a crop tool. Below 32 px the stroke
+thickens, the brackets move slightly outward and the dot grows, because a proportional hairline
+disappears at 16 px; pushed much further out the brackets crowd the rounded corner and read as a
+broken second outline, so the small-size geometry is a deliberate compromise rather than a scale.
+
+`build-app.sh` copies the `.icns` into `Contents/Resources` **before** `codesign`, or the signature
+would cover a bundle that does not contain it. The full-colour icon is for Finder, Get Info and
+System Settings only — the menu-bar item stays a monochrome SF Symbol template so it tints with
+the menu bar and inverts correctly in dark mode.

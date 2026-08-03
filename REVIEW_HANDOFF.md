@@ -6,6 +6,11 @@ The working tree is left exactly as verified below.
 **Environment:** macOS 26.5.2 (25F84), Apple silicon, Swift 6.3.3, Command Line Tools 26.5,
 **no `Xcode.app` installed**. One display attached (1920×1080 pt @ 2.0 → 3840×2160 px).
 
+> **Round 5.** Baseline `6d553b8`. Pinning (`F3`), window-aware selection, clipboard-first
+> screenshots and an original app icon. See [§0.0](#00-round-5--pinning-window-aware-selection-clipboard-first-icon)
+> for the mapping and [§4.9](#49-round-5-specific-gaps) for what could **not** be verified here —
+> in particular, none of the interactive pin behaviour was driven by a human in this session.
+>
 > **Round 3.** Round-2 commit `f521ac6` was re-reviewed and four remaining Important issues were
 > repaired in the current working tree: colour provenance, sample-queue draining, delayed I/O
 > errors, and unknown-volume case sensitivity. See the updated A3/B7/B8 rows below.
@@ -15,6 +20,44 @@ The working tree is left exactly as verified below.
 > [§4.6](#46-round-2-specific-gaps) for what round 2 could *not* verify on this machine.
 
 ---
+
+## 0.0 Round 5 — pinning, window-aware selection, clipboard-first, icon
+
+Five areas. Full requirement → file → test mapping is in
+[REQUIREMENTS.md](REQUIREMENTS.md#round-5--pinning-window-aware-selection-clipboard-first-app-icon)
+(rows N1–N21); this section is the reviewer's short version.
+
+| Area | New files | New tests |
+|---|---|---|
+| Pin shortcut (`F3`) | `PriorityHotKeyClaim.swift`, `SharedEscapeKey.swift` | *Bare-key allow list* (6), *Independent shortcut registration* (3), *Pin shortcut migration* (5), *Shared Escape stack* (8) |
+| Pin windows | `PinGeometry.swift`, `PinWindow.swift`, `PinboardController.swift`, `PasteboardImage.swift` | *Pin memory limits* (7), *Pin placement* (7), *Pin zoom* (5), *Pin opacity* (2), *Pasteboard image policy* (9) |
+| Window-aware selection | `WindowPicker.swift`, `WindowSurvey.swift` | *Window picking* (10), *Click versus drag* (4), *Edge snapping* (9) |
+| Clipboard-first screenshots | — (`StillCaptureAction` in `AppSettings`) | *Screenshot post-capture action* (2) |
+| App icon | `scripts/generate-icon.swift`, `Resources/AppIcon/` | icon toolchain checks, §3.8 |
+
+Three decisions worth a reviewer's attention:
+
+1. **`F3` is a pin shortcut, not a capture shortcut.** `⌥⇧5` is unchanged. The two register in
+   separate `GlobalHotKeyMonitor` slots and roll back independently, because `F3` is Mission
+   Control's factory binding and is the one likely to fail. The bare-key allow list is *exactly*
+   F1–F20, enumerated — never a letter or a digit, which a modifier-less hot key would make
+   untypeable system-wide.
+2. **One Escape, two claimants.** Carbon refuses a duplicate registration, so a recording started
+   while a pin was open would have failed to claim Escape. `PriorityHotKeyClaim` keeps one
+   registration and a stack of handlers; the top claimant wins and popping restores the one
+   underneath. The self-test asserts the duplicate-registration refusal directly rather than
+   assuming it.
+3. **A pin releases its bitmap explicitly.** AppKit keeps a window that was on screen alive past
+   `close()`; that is reproducible with a plain `NSPanel` and no TriCap code
+   (`scripts/diagnostics/panel-lifetime-probe.swift`). Since a pin holds a full-resolution
+   screenshot, `PinWindow.tearDown()` nils the image, the image view and the delegate rather than
+   waiting for a `dealloc` that is not TriCap's to schedule. The self-test asserts the *bitmap* is
+   gone, which is deterministic, and reports the window shell's fate as a NOTE rather than a check.
+
+Also corrected while testing: `WelcomeView` still said "drag out a region… annotate, then save",
+which the clipboard-first default made untrue. It now describes clicking a window, pasting, and
+pinning. The Settings window grew from 470 to 700 pt tall so the whole General tab — two shortcuts,
+the post-screenshot action, the countdown and the permission row — is visible without scrolling.
 
 ## 0. Round 4 — Codex acceptance fixes
 
@@ -440,27 +483,59 @@ all public — plus the in-repo modules and `CWebP`.
 .build/release/TriCap --render-ui-snapshots ./build/ui-snapshots
 ```
 
-Six PNGs in `build/ui-snapshots/`, all inspected:
+Fourteen PNGs in `build/ui-snapshots/`, all inspected individually:
 
 | File | Shows |
 |---|---|
-| `01-settings-general.png` | Settings → General: shortcut recorder reading `⌥⇧5`, explanatory text, permission row (`Granted` + "Open System Settings") |
+| `01-settings-general.png` | **Round 5, changed.** Settings → General, now 700 pt tall so nothing is cut off: **Screenshot shortcut** `⌥⇧5` (with "Click a window … hold ⌥ while dragging to ignore edge snapping"), **Pin shortcut** `F3` (naming the Mission Control conflict), **After a screenshot → Copy to clipboard**, countdown `3 s`, permission row `Granted` |
 | `02-editor-still.png` | Still editor: 5 tool buttons with the active one highlighted **and named** ("Arrow"), 6-colour palette, stroke slider, undo/redo/clear, composited annotations, `940 × 620 px`, Format PNG **· Lossless**, `Saves to ~/Pictures/TriCap`, Close/Save |
 | `03-editor-clip-trim.png` | Clip editor: mosaic tool selected with its block-size slider, `8 of 12 frames · 0.7 s`, Reset trim, Start=2 / End=9 / Frame=5 sliders, `640 × 400 px  Animated WebP` |
-| `04-selection-overlay.png` | Selection overlay in recording mode: persistent banner "● Record a clip   S screenshot   Esc cancel", punched-out selection with red corner brackets, `940 × 520 px` badge, "Release to start recording" |
+| `04-selection-overlay.png` | Selection overlay in recording mode: persistent banner "● Record a clip · **Click a window or drag** · S screenshot · Esc cancel", punched-out selection with red corner brackets, `940 × 520 px` badge, "Release to start recording" |
 | `05-recording-hud.png` | Recording HUD, rendered by `RecordingHUD.populateHUD` itself: `4.2 s / 15 s`, `51 frames · 12 MB`, progress bar toward the limit, **`Esc cancels · Click Stop to finish`** (round 4 — it used to promise a Return key that could not work), Stop button in dark appearance |
-| `06-menu-bar-item.png` | Status-item template icon at menu-bar size |
+| `06-menu-bar-item.png` | Status-item template icon at menu-bar size — **still monochrome**; the new full-colour app icon is bundle-only, exactly as specified |
 | `07-editor-single-frame-clip.png` | **Round 2 (B10).** A one-frame clip: `1 of 1 frames · 0.1 s`, *Reset trim* disabled, "Single frame — nothing to trim.", and **no** Start/End/Frame sliders |
 | `08-settings-quality.png` | **Round 3.** Quality tab, Advanced expanded: preset *Balanced* with its summary, format PNG with "Lossless — every pixel is preserved exactly", **PNG quality → "Lossless — no setting"** (no stepper), the four recording parameters, and the size-guidance footer |
-| `09-welcome.png` | **Round 3.** Getting Started: "TriCap is running", the three numbered steps, *Ask macOS now* for the not-determined permission state |
+| `09-welcome.png` | **Round 5, changed.** Getting Started: "TriCap is running", *Ask macOS now*, and **four** steps — the old "drag out a region … annotate, then save" was untrue once screenshots stopped opening the editor, so step 2 now says click a window or drag, step 3 is "Paste it" (pointing at *Screenshot and Edit…* for annotation), step 4 is "Press F3 to pin" |
 | `10-export-toast.png` | Post-export confirmation: file name, **`1440 × 900 · Animated WebP · 52 frames · 4.7 s`** (round 4 — this line was missing), `~/Documents/Vault/assets · 1.4 MB`, "Copied the Markdown reference", **Show in Finder** |
-| `11-selection-overlay-screenshot.png` | **Round 3.** Screenshot mode: blue banner "● Take a screenshot   R record   Esc cancel", corner brackets, "Release to capture" |
+| `11-selection-overlay-screenshot.png` | **Round 3.** Screenshot mode: blue banner "● Take a screenshot · Click a window or drag · R record · Esc cancel", corner brackets, "Release to capture" |
 | `12-recording-countdown.png` | Countdown, now drawn by `RecordingHUD.populateCountdown` itself: `3`, "Recording starts…", "Esc to cancel" — and Escape now genuinely works from other apps |
 | `13-export-toast-warning.png` | **Round 4.** The same toast carrying a wrapping warning, proving the panel grows instead of clipping |
+| `14-selection-window-highlight.png` | **Round 5, new.** The pre-drag state: a window under the pointer outlined and tinted, with a `1120 × 640 px · click to capture` badge — the real `SelectionOverlayView.drawWindowHighlight` |
 
 **These are offscreen renders of the real view hierarchies** (`NSHostingView` / `SelectionOverlayView`
 in off-screen windows, captured via `CALayer.render(in:)`), not desktop captures — see §4.1 for why,
 and §4.2 for what that does not cover.
+
+### 3.8 App icon
+
+The icon is generated, not drawn by hand in a binary file:
+
+```bash
+swift scripts/generate-icon.swift Resources/AppIcon
+iconutil -c icns Resources/AppIcon/TriCap.iconset -o Resources/AppIcon/TriCap.icns
+```
+
+Verified:
+
+| Check | Command | Result |
+|---|---|---|
+| The `.icns` round-trips back to a complete iconset | `iconutil -c iconset Resources/AppIcon/TriCap.icns` | all 10 entries — `16`, `16@2x`, `32`, `32@2x`, `128`, `128@2x`, `256`, `256@2x`, `512`, `512@2x` |
+| Every entry is the size its name claims | `sips -g pixelWidth -g pixelHeight` per file | 16/32 · 32/64 · 128/256 · 256/512 · 512/1024 — all square, all exact |
+| Master is 1024 × 1024 | `sips` on `TriCap-1024.png` | `1024 × 1024` |
+| Contact sheets exist for both backgrounds | `icon-check-light.png`, `icon-check-dark.png` | `2192 × 1088`, each tile at **true pixel size** (16/32/128/256/512/1024), bottom-aligned |
+| `Info.plist` is valid and names the icon | `plutil -lint`, `plutil -extract CFBundleIconFile raw` | `OK`, `TriCap` |
+| The icon is inside the bundle **before** signing | `ls build/release/TriCap.app/Contents/Resources` | `TriCap.icns` present; `build-app.sh` fails outright if the source `.icns` is missing |
+| The signature covers it | `codesign --verify --deep --strict --verbose=2` | `valid on disk`, `satisfies its Designated Requirement` |
+| The system really resolves the bundle to this icon | `NSWorkspace.icon(forFile:)` on the built app, sampling pixels | `1024 × 1024`; centre pixel coral `rgb(255, 119, 101)`, lower body azure `rgb(41, 146, 233)` — this is what Finder and Get Info draw |
+| The menu bar did **not** change | snapshot `06-menu-bar-item.png` | still the monochrome template glyph |
+
+Both contact sheets were opened and looked at, not just generated. At 512 px and above the mark is
+plainly a viewfinder with a coral shutter dot; at 128 and 256 it is still unambiguous; at 32 it
+reads correctly; at **16 px** the blue rounded-square silhouette, the four brackets and the red dot
+are all still distinguishable, but this is the honest limit of a four-bracket mark — the brackets
+are two pixels of stroke and the dot is three pixels across. That is why the generator thickens the
+stroke and enlarges the dot below 32 px, and why pushing the brackets further outward was rejected:
+past ~0.18 inset they crowd the rounded corner and read as a broken second outline.
 
 ---
 
@@ -574,6 +649,44 @@ from the documented behaviour of those filesystems, not from observation here.
 reports case-*insensitive*. The comparison rule is tested directly as a pure function over path
 components, and `volumeCaseSensitivity(for:)` is tested to agree with whatever this volume reports.
 A case-sensitive APFS volume would exercise the other branch end to end.
+
+### 4.9 Round-5-specific gaps
+
+**No interactive verification happened in this session.** Screen automation is declined here, so
+nobody pressed `⌥⇧5`, nobody pressed `F3`, nobody dragged a pin, and nobody pasted a screenshot
+into another application. Everything below is either unit-tested logic or a runtime assertion made
+by `--selftest` in a real `NSApplication` — which is *not* the same as a person using it, and is
+listed as unverified rather than dressed up as a pass.
+
+What **was** exercised at runtime (in `--selftest`, in-process, real AppKit and real Carbon):
+
+- `⌥⇧5` and `F3` registering simultaneously in separate slots, and this machine took the
+  **success** branch — F3 was claimable here. The Mission Control conflict branch therefore did
+  *not* execute; only its code path and message are reviewed, not observed.
+- Carbon refusing a duplicate registration of the same combination (asserted, not assumed).
+- Releasing the pin shortcut leaving `⌥⇧5` registered.
+- Real `PinWindow`s created from a real `NSPasteboard`: empty clipboard → no window, text-only →
+  no window, PNG → a window, a third pin refused by the count ceiling.
+- Those windows' actual `level` (3 — above `.normal`, below `.screenSaver`), their
+  `collectionBehavior` (`canJoinAllSpaces` + `fullScreenAuxiliary`), and that none of them ever
+  became the key window.
+- `closeAll()` releasing the bitmap and the content view, being idempotent, and leaving no visible
+  pin behind.
+
+What is **not** verified:
+
+| Change | Not verified | How to check by hand |
+|---|---|---|
+| `F3` pinning | That pressing `F3` while another app is frontmost creates a pin. Registration succeeds and the handler is wired, but no key was pressed. | Copy an image, focus Safari, press `F3` |
+| Mission Control conflict | The failure branch never ran here, because `F3` was free on this machine. The message and the re-bind path are unreviewed by execution. | Re-enable "Mission Control → F3" in Keyboard settings, relaunch TriCap, look for the error and rebind |
+| Focus is not stolen | The self-test asserts `canBecomeKey == false` and that no pin became key — but nothing typed into another app while a pin appeared. | Start typing in a text editor, press `F3` mid-sentence, confirm the characters still land |
+| Cross-Space / full-screen | `collectionBehavior` is asserted; the actual behaviour when switching Spaces or entering a full-screen app was not observed. | Pin an image, swipe to another Space, enter a full-screen app |
+| Pin interaction | Drag, scroll/pinch zoom, opacity, the context menu and `Esc`-to-close are unit-tested as geometry (`PinZoom`, `PinOpacity`, `PinPlacement`) and wired to real event handlers, but no pointer moved. | Pin an image; drag it, scroll on it, pinch, right-click through every menu item, press `Esc` |
+| Multi-pin at scale | Two pins were created; the shipped ceiling of 12 pins / 120 MP was tested only through `PinLimits` arithmetic, not by opening twelve real windows. | Pin a dozen large screenshots and watch memory |
+| Window-aware selection | The picking, gesture and snapping rules are pure functions with 23 tests, and `WindowSurvey` converts real `SCWindow` frames — but no one hovered a window and clicked it. **Only one display is attached here**, so multi-display and mixed-scale-factor selection are untested in practice. | Hover several overlapping windows, click one; repeat with a second display attached |
+| Clipboard-first screenshots | That the captured image actually pastes into another app. `PasteboardImage.write` is tested and reports a receipt, and the round-trip through PNG is tested — but nothing was pasted anywhere. | Press `⌥⇧5`, capture, then `⌘V` into Preview, Mail and Slack |
+| Clipboard failure recovery | `presentClipboardFailure` was never triggered; making `NSPasteboard` refuse a write on demand is not something this harness can force. | — (code review only) |
+| Icon in Finder | `NSWorkspace.icon(forFile:)` returns TriCap's icon (§3.8), which is what Finder draws — but no one opened a Finder window or a Get Info panel and looked. | `open -R build/release/TriCap.app`, then `⌘I` |
 
 ### 4.8 Round-4-specific gaps
 
@@ -722,25 +835,37 @@ swift build && swift build -c release
 # 2. tests
 ./scripts/test.sh
 
-# 3. app bundle + the "no external libwebp" gate
+# 3. regenerate the app icon (optional — the outputs are committed; this proves they are the
+#    product of the script and not a binary asset)
+swift scripts/generate-icon.swift Resources/AppIcon
+iconutil -c icns Resources/AppIcon/TriCap.iconset -o Resources/AppIcon/TriCap.icns
+
+# 4. app bundle + the "no external libwebp" gate + the icon copied in before codesign
 ./scripts/build-app.sh release
 
-# 4. end-to-end capture pipeline (captures a real screen region).
+# 5. end-to-end capture pipeline (captures a real screen region, and creates real pin windows).
 #    `caffeinate -dimsu` keeps the display awake — without it this machine's screen sleeps
 #    mid-run and ScreenCaptureKit serves a frozen composite (see §4.6).
 caffeinate -dimsu .build/release/TriCap --selftest ./build/selftest
 
-# 5. UI snapshots
+# 6. UI snapshots
 .build/release/TriCap --render-ui-snapshots ./build/ui-snapshots
 
-# 6. re-vendor libwebp from upstream (verifies the pinned SHA-256)
+# 7. re-vendor libwebp from upstream (verifies the pinned SHA-256)
 ./scripts/vendor-libwebp.sh 1.6.0   # should produce no diff
 
-# 7. run it
+# 8. run it
 open build/release/TriCap.app
 ```
 
-Steps 4 and 5 need Screen & System Audio Recording permission for the binary being run.
+Steps 5 and 6 need Screen & System Audio Recording permission for the binary being run.
+
+To reproduce the "AppKit outlives `close()`" finding from §0.0 independently of TriCap — a plain
+`NSPanel`, a plain `NSView`, no TriCap types anywhere in the file:
+
+```bash
+swift scripts/diagnostics/panel-lifetime-probe.swift
+```
 
 To reproduce the "display is not compositing live" finding from §4.6 independently of TriCap:
 

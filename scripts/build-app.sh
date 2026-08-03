@@ -48,6 +48,16 @@ cp "$ROOT/Sources/CWebP/COPYING" "$CONTENTS/Resources/libwebp-COPYING.txt"
 cp "$ROOT/Sources/CWebP/PATENTS" "$CONTENTS/Resources/libwebp-PATENTS.txt"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
+# The app icon, named to match CFBundleIconFile. It has to land in Contents/Resources *before*
+# codesign, or the signature covers a bundle that does not contain it and `codesign --verify`
+# fails on the next launch. Regenerate it with `swift scripts/generate-icon.swift`.
+ICON="$ROOT/Resources/AppIcon/TriCap.icns"
+if [[ ! -f "$ICON" ]]; then
+  echo "!! missing $ICON — run: swift scripts/generate-icon.swift Resources/AppIcon" >&2
+  exit 1
+fi
+cp "$ICON" "$CONTENTS/Resources/TriCap.icns"
+
 IDENTITY="${CODESIGN_IDENTITY:--}"
 echo "==> codesign (identity: $IDENTITY)"
 codesign --force --sign "$IDENTITY" --timestamp=none "$APP"

@@ -21,8 +21,13 @@ public final class GlobalHotKeyMonitor {
     public enum Slot: UInt32, CaseIterable, Sendable {
         /// The user's configurable capture shortcut. Always registered while TriCap runs.
         case primaryCapture = 1
-        /// A bare Escape, claimed *only* for the duration of a recording.
-        case recordingCancel = 2
+        /// A bare Escape, shared by everything that wants "get me out of this" — recording
+        /// cancellation and pin dismissal. Carbon allows only one registration per combination,
+        /// so the two go through `SharedEscapeKey`, which stacks their handlers.
+        case escapeDismiss = 2
+        /// The user's configurable pin shortcut. Independent of `primaryCapture`, so one being
+        /// unavailable never disables the other.
+        case pinFromClipboard = 3
     }
 
     /// Four-character signature identifying TriCap's hot keys ('TRCP').
@@ -155,6 +160,8 @@ extension HotKeyCombo {
         if flags.contains(.option) { carbon |= CarbonModifier.option.rawValue }
         if flags.contains(.control) { carbon |= CarbonModifier.control.rawValue }
 
+        // `isValid` accepts a bare function key from `bareKeyAllowList` — that is how F3 can be
+        // recorded as the pin shortcut — while still refusing a bare letter or digit.
         let combo = HotKeyCombo(keyCode: UInt32(event.keyCode), carbonModifiers: carbon)
         return combo.isValid ? combo : nil
     }

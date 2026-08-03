@@ -11,6 +11,7 @@ import TriCapKit
 /// of the way. It can be reopened from Settings → About.
 struct WelcomeView: View {
     let shortcut: HotKeyCombo
+    let pinShortcut: HotKeyCombo
     let permissionStatus: ScreenRecordingAuthorization
 
     var onGrantPermission: () -> Void
@@ -69,12 +70,17 @@ struct WelcomeView: View {
             }
 
             step(number: 2, title: "Press \(shortcut.displayString)", systemImage: "keyboard", tint: .secondary) {
-                Text("Anywhere, in any app. The screen dims and you drag out a region. Press **R** to record a clip instead, **S** to go back to a screenshot, **Esc** to cancel.")
+                Text("Anywhere, in any app. The screen dims — **click a window** to grab just that window, or drag out any area. Press **R** to record a clip instead, **S** to go back to a screenshot, **Esc** to cancel.")
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            step(number: 3, title: "Annotate, then save", systemImage: "pencil.tip.crop.circle", tint: .secondary) {
-                Text("Arrows, boxes, text, pen and mosaic. Saving writes the file and copies a reference you can paste straight into a note.")
+            step(number: 3, title: "Paste it", systemImage: "doc.on.clipboard", tint: .secondary) {
+                Text("A screenshot goes straight to the clipboard — nothing is written to disk unless you ask. To annotate with arrows, boxes, text, pen and mosaic, use **Screenshot and Edit…** in the menu, or change the default in Settings.")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            step(number: 4, title: "Press \(pinShortcut.displayString) to pin", systemImage: "pin", tint: .secondary) {
+                Text("Floats the clipboard image above your other windows so you can keep a reference in view. **Esc** closes it.")
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

@@ -9,9 +9,19 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 
 - **First launch** shows a short Getting Started window: where the menu-bar icon is, how to grant
   Screen Recording, and what the shortcut is. Reopen it any time from the menu or Settings → About.
-- **Global shortcut** (default `⌥⇧5`) opens a full-screen region picker across every display.
-- In the picker: drag to capture a **screenshot**, press **R** to switch to **recording** mode
-  (**S** switches back), **Esc** cancels.
+- **Screenshot shortcut** (default `⌥⇧5`) opens a full-screen region picker across every display.
+- In the picker: **hover a window** to highlight it and **click** to capture just that window, or
+  **drag** for a free region. Edges snap to nearby windows and screen borders; hold **Option**
+  while dragging to turn snapping off. Press **R** to switch to **recording** mode (**S** switches
+  back), **Esc** cancels.
+- **A screenshot goes straight to the clipboard** by default — no editor window, no file written.
+  Paste it wherever you were already working. Settings can switch this to "open the editor", and
+  the menu keeps a separate **Screenshot and Edit…** entry either way.
+- **Pin shortcut** (default `F3`) pins whatever image is on the clipboard as a borderless floating
+  window that stays above ordinary windows, follows you across Spaces and full-screen apps, and
+  never steals keyboard focus. Drag to move, scroll or pinch to zoom, right-click for original
+  size / fit to screen / opacity / copy / save / close. **Esc** closes the frontmost pin, and the
+  menu can close them all. With no image on the clipboard nothing is created — just a short notice.
 - **Esc** cancels from anywhere, throughout the countdown *and* the recording — TriCap claims a
   system-wide Escape for that span only and releases it the moment the recording ends. The HUD's
   **Stop** button is a click; there is no global stop key.
@@ -131,17 +141,39 @@ identity to avoid that. This repository does not sign, notarize or publish.
 ## Using it
 
 1. Press `⌥⇧5` (or pick **Capture Region…** / **Record Region…** from the menu).
-2. Drag out a region. The readout shows the exact pixel size. `R`/`S` toggle screenshot vs
-   recording; `Esc` cancels.
-3. For a recording: the countdown runs, then record. Click **Stop** to finish, or press `Esc` —
+2. Click a highlighted window, or drag out a region. The readout shows the exact pixel size.
+   Hold `Option` while dragging to ignore snapping. `R`/`S` toggle screenshot vs recording;
+   `Esc` cancels.
+3. A screenshot is **on your clipboard** — paste it. To annotate instead, use **Screenshot and
+   Edit…** from the menu, or switch the default in Settings → General.
+4. For a recording: the countdown runs, then record. Click **Stop** to finish, or press `Esc` —
    from any app — to abandon it, during the countdown or during the recording.
-4. Annotate. `⌘Z` / `⇧⌘Z` undo and redo. For a clip, drag the **Start**/**End** handles to trim
+5. Annotate. `⌘Z` / `⇧⌘Z` undo and redo. For a clip, drag the **Start**/**End** handles to trim
    and the **Frame** handle to scrub.
-5. **Save**. The file lands in your save folder and the reference goes to the clipboard.
+6. **Save**. The file lands in your save folder and the reference goes to the clipboard.
+
+### Pinning
+
+Press `F3` (or **Pin from Clipboard**) to float the clipboard image over everything else — handy
+for keeping a reference visible while you work in another app.
+
+| | |
+|---|---|
+| Move | drag anywhere on the image |
+| Zoom | scroll, or pinch on a trackpad — anchored under the pointer, 10 %–800 % |
+| Opacity | right-click → **Opacity** |
+| Right-click | Original Size, Fit to Screen, Opacity, Copy, Save…, Close, Close All |
+| Close | `Esc` closes the frontmost pin; the menu closes them all |
+
+Up to 12 pins at once, with a combined ceiling of ~120 megapixels; beyond that TriCap says so
+instead of quietly exhausting memory. A pin never becomes the key window, so your typing keeps
+going to whatever app you were in, and it floats at the ordinary floating-window level — never
+high enough to sit over a system password prompt.
 
 ### Settings
 
-- **General** — global shortcut (click and press keys), recording countdown, permission status.
+- **General** — screenshot shortcut and pin shortcut (click and press keys), what a screenshot does
+  afterwards, recording countdown, permission status.
 - **Quality** — a named quality preset, the screenshot format, and an *Advanced* section with the
   real encoder parameters. See [Quality](#quality) below.
 - **Output** — save folder, Markdown/Obsidian vault root, reference style (`![](path)` or
@@ -230,6 +262,24 @@ frame's duration. The stored frame count is therefore often *lower* than the num
 this is correct and shrinks the file without changing playback. If *nothing* moved for the whole
 recording, libwebp drops the animation chunk entirely and writes a single-frame still WebP;
 TriCap keeps that file and tells you nothing moved.
+
+**Modifier-less shortcuts.** A hot key with no modifier is swallowed system-wide, so binding one
+to a letter would make that letter untypeable everywhere. The allow list is therefore *exactly*
+the function row (F1–F20) — see `HotKeyCombo.bareKeyAllowList`. `F3` is also Mission Control's
+factory binding: if the registration fails TriCap says so and asks for a different key rather than
+silently substituting one. The screenshot and pin shortcuts register, migrate and roll back
+independently, so a failure on one never disturbs the other.
+
+**One Escape, several claimants.** Carbon registers a given combination once, so a recording that
+wants Escape and an open pin that also wants it cannot both call `RegisterEventHotKey`.
+`PriorityHotKeyClaim` keeps a single registration and a stack of handlers: the most recent claimant
+receives the key, and popping it hands the key back to the one underneath.
+
+**App icon.** [scripts/generate-icon.swift](scripts/generate-icon.swift) *is* the icon source —
+Core Graphics paths, no binary design file and no third-party art. It emits the 1024 px master,
+the full `.iconset`, and light/dark contact sheets; `iconutil` turns the iconset into
+`Resources/AppIcon/TriCap.icns`, which `build-app.sh` copies into the bundle before signing. The
+menu-bar item is unrelated: it stays a monochrome SF Symbol template so it tints correctly.
 
 ---
 

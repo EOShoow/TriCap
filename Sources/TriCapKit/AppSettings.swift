@@ -27,6 +27,33 @@ public enum OutputFormat: String, Codable, CaseIterable, Sendable {
     public var isAnimated: Bool { self == .animatedWebP }
 }
 
+/// What TriCap does with a finished screenshot.
+public enum StillCaptureAction: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// Put it straight on the clipboard and get out of the way. TriCap's default: the common case
+    /// is pasting a screenshot into something, and that should not cost a window and a Save.
+    case copyToClipboard
+    /// Open the annotation editor, where saving is an explicit step.
+    case openEditor
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .copyToClipboard: return "Copy to clipboard"
+        case .openEditor: return "Open the editor"
+        }
+    }
+
+    public var summary: String {
+        switch self {
+        case .copyToClipboard:
+            return "The fastest path: capture, then paste. Nothing is written to disk unless you ask for it."
+        case .openEditor:
+            return "Annotate first, then save. Use “Screenshot and Edit…” in the menu to do this once without changing the default."
+        }
+    }
+}
+
 /// How a copied reference should be shaped when the file lands inside the vault root.
 public enum MarkdownLinkStyle: String, Codable, CaseIterable, Sendable {
     /// `![](assets/shot.png)` — portable CommonMark, works in Obsidian too.
@@ -45,7 +72,12 @@ public enum MarkdownLinkStyle: String, Codable, CaseIterable, Sendable {
 /// Everything the user can configure. Plain `Codable` value type so it can be diffed,
 /// snapshotted in tests, and persisted as a single JSON blob in `UserDefaults`.
 public struct AppSettings: Codable, Equatable, Sendable {
+    /// Opens the region picker for a screenshot or a recording.
     public var hotKey: HotKeyCombo
+    /// Pins whatever image is on the clipboard as a floating window.
+    public var pinHotKey: HotKeyCombo
+    /// What happens after a still capture succeeds.
+    public var stillCaptureAction: StillCaptureAction
     /// Directory files are written to.
     public var saveDirectoryPath: String
     /// Optional Markdown/Obsidian vault root. When the output lands inside it, TriCap
@@ -82,6 +114,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public init(
         hotKey: HotKeyCombo = .default,
+        pinHotKey: HotKeyCombo = .defaultPin,
+        stillCaptureAction: StillCaptureAction = .copyToClipboard,
         saveDirectoryPath: String = AppSettings.defaultSaveDirectory.path,
         markdownVaultRootPath: String? = nil,
         markdownLinkStyle: MarkdownLinkStyle = .markdown,
@@ -96,6 +130,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         filenamePrefix: String = "TriCap"
     ) {
         self.hotKey = hotKey
+        self.pinHotKey = pinHotKey
+        self.stillCaptureAction = stillCaptureAction
         self.saveDirectoryPath = saveDirectoryPath
         self.markdownVaultRootPath = markdownVaultRootPath
         self.markdownLinkStyle = markdownLinkStyle
@@ -207,6 +243,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let fallback = AppSettings()
         hotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .hotKey) ?? fallback.hotKey
+        // Absent in every blob written before pinning existed: fall back to the shipped F3.
+        pinHotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .pinHotKey) ?? fallback.pinHotKey
+        stillCaptureAction = c.decodeTolerantly(StillCaptureAction.self, forKey: .stillCaptureAction)
+            ?? fallback.stillCaptureAction
         saveDirectoryPath = try c.decodeIfPresent(String.self, forKey: .saveDirectoryPath) ?? fallback.saveDirectoryPath
         markdownVaultRootPath = try c.decodeIfPresent(String.self, forKey: .markdownVaultRootPath)
         markdownLinkStyle = c.decodeTolerantly(MarkdownLinkStyle.self, forKey: .markdownLinkStyle) ?? fallback.markdownLinkStyle

@@ -44,7 +44,7 @@ enum UISnapshotRenderer {
         let store = SettingsStore(defaults: snapshotDefaults())
 
         try write(
-            hosting(SettingsView(store: store), size: CGSize(width: 540, height: 470)),
+            hosting(SettingsView(store: store), size: CGSize(width: 540, height: 700)),
             to: directory.appendingPathComponent("01-settings-general.png")
         )
 
@@ -62,11 +62,12 @@ enum UISnapshotRenderer {
             hosting(
                 WelcomeView(
                     shortcut: store.settings.hotKey,
+                    pinShortcut: store.settings.pinHotKey,
                     permissionStatus: .notDetermined,
                     onGrantPermission: {}, onOpenSystemSettings: {},
                     onTryCapture: {}, onOpenSettings: {}, onDismiss: {}
                 ),
-                size: CGSize(width: 460, height: 470)
+                size: CGSize(width: 460, height: 560)
             ),
             to: directory.appendingPathComponent("09-welcome.png")
         )
@@ -140,6 +141,12 @@ enum UISnapshotRenderer {
             selectionOverlaySnapshot(recording: false),
             to: directory.appendingPathComponent("11-selection-overlay-screenshot.png")
         )
+        // Hovering a window before any drag: the highlight and its size badge, which is what the
+        // user sees for the whole first second of every capture now.
+        try write(
+            windowHighlightSnapshot(),
+            to: directory.appendingPathComponent("14-selection-window-highlight.png")
+        )
         try write(countdownSnapshot(), to: directory.appendingPathComponent("12-recording-countdown.png"))
         try write(recordingHUDSnapshot(), to: directory.appendingPathComponent("05-recording-hud.png"))
         try write(menuBarSnapshot(), to: directory.appendingPathComponent("06-menu-bar-item.png"))
@@ -168,6 +175,30 @@ enum UISnapshotRenderer {
             height: 260
         )
         overlay.selectionPixelSize = CGSize(width: 940, height: 520)
+
+        settle(container)
+        return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
+    }
+
+    /// The overlay with a window highlighted under the pointer and no drag in progress.
+    private static func windowHighlightSnapshot() throws -> NSBitmapImageRep {
+        let size = CGSize(width: 900, height: 560)
+        let container = offscreenContainer(size: size)
+        let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
+
+        let overlay = SelectionOverlayView(frame: container.bounds)
+        overlay.isRecordingMode = false
+        container.addSubview(overlay)
+
+        // Same global-point convention as `selectionOverlaySnapshot`.
+        let windowOrigin = container.window?.frame.origin ?? .zero
+        overlay.highlightedWindow = CGRect(
+            x: windowOrigin.x + 150,
+            y: windowOrigin.y + 120,
+            width: 560,
+            height: 320
+        )
+        overlay.highlightedWindowPixelSize = CGSize(width: 1120, height: 640)
 
         settle(container)
         return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))

@@ -31,15 +31,10 @@ final class RecordingChromeController: RecordingChrome {
     private var dismissed = false
     private var countdownCancelled = false
 
-    private lazy var escapeClaim = TransientHotKeyClaim(
-        combo: .bareEscape,
-        register: { combo, action in
-            GlobalHotKeyMonitor.shared.register(
-                combo, in: .recordingCancel, allowingNoModifiers: true, action: action
-            )
-        },
-        unregister: { GlobalHotKeyMonitor.shared.unregister(.recordingCancel) }
-    )
+    /// Handle into the shared Escape stack. A pin may already hold Escape; pushing puts the
+    /// recording on top for its lifetime and popping hands it back.
+    private var escapeToken: PriorityHotKeyClaim.Token?
+    private var escapeHandler: (() -> Void)?
 
     // MARK: - Countdown
 
@@ -53,10 +48,11 @@ final class RecordingChromeController: RecordingChrome {
 
         // Claim before the first tick, even when there is no countdown to show, so the recording
         // phase inherits an already-live claim.
-        let claimed = escapeClaim.claim { [weak self] in
+        escapeHandler = { [weak self] in
             // Setting a flag is idempotent, so a user leaning on Escape cancels exactly once.
             self?.countdownCancelled = true
         }
+        let claimed = claimEscape()
 
         guard seconds > 0 else { return !countdownCancelled }
 
@@ -91,7 +87,8 @@ final class RecordingChromeController: RecordingChrome {
 
         // Rebind rather than re-register: the claim is normally already live from the countdown,
         // and re-registering the same combination would fail with `eventHotKeyExistsErr`.
-        let claimed = escapeClaim.claim { onCancel() }
+        escapeHandler = { onCancel() }
+        let claimed = claimEscape()
         if !claimed {
             // Another application already owns a bare Escape hot key. The Stop button still works;
             // say so rather than pretending Escape is wired up.
@@ -104,10 +101,20 @@ final class RecordingChromeController: RecordingChrome {
         hud.update(progress: progress, limits: limits)
     }
 
+    /// Push onto the shared stack once, then rebind in place. `escapeHandler` is read at fire
+    /// time, so swapping it does not need a new registration.
+    private func claimEscape() -> Bool {
+        if escapeToken != nil { return true }
+        escapeToken = SharedEscapeKey.claim.push { [weak self] in self?.escapeHandler?() }
+        return escapeToken != nil
+    }
+
     func dismiss() {
         guard !dismissed else { return }
         dismissed = true
-        escapeClaim.release()
+        SharedEscapeKey.claim.pop(escapeToken)
+        escapeToken = nil
+        escapeHandler = nil
         hud.dismissCountdown()
         hud.dismiss()
     }

@@ -27,6 +27,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var welcomeWindow: NSWindow?
     private let editorPresenter = EditorPresenter()
     private let toast = ExportToastPresenter()
+    private lazy var pinboard = PinboardController(settingsProvider: { [weak self] in
+        self?.store.settings ?? AppSettings()
+    })
 
     private var selector: RegionSelector?
     /// The one live recording, if any. Owned by the running `Task` in `beginCapture`.
@@ -48,14 +51,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         registerHotKey()
+        registerPinHotKey()
+        pinboard.onCountChanged = { [weak self] in self?.refreshMenu() }
 
         store.onChange = { [weak self] previous, current in
             guard let self, !self.isRollingBackHotKey else { return }
+            var handled = false
             if previous.hotKey != current.hotKey {
                 self.registerHotKey(previous: previous.hotKey)
-            } else {
-                self.refreshMenu()
+                handled = true
             }
+            if previous.pinHotKey != current.pinHotKey {
+                self.registerPinHotKey(previous: previous.pinHotKey)
+                handled = true
+            }
+            if !handled { self.refreshMenu() }
         }
 
         if let error = store.prepareSaveDirectory() {
@@ -71,6 +81,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        pinboard.closeAll()
+        SharedEscapeKey.claim.reset()
         GlobalHotKeyMonitor.shared.unregisterAll()
     }
 
@@ -142,12 +154,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             record.target = self
             record.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: nil)
             menu.addItem(record)
+
+            // Always available regardless of the configured default, so "annotate this one" never
+            // requires a trip through Settings.
+            let captureAndEdit = NSMenuItem(
+                title: "Screenshot and Edit…",
+                action: #selector(captureRegionAndEdit),
+                keyEquivalent: ""
+            )
+            captureAndEdit.target = self
+            captureAndEdit.image = NSImage(systemSymbolName: "pencil.tip.crop.circle", accessibilityDescription: nil)
+            menu.addItem(captureAndEdit)
         }
 
         menu.addItem(.separator())
 
+        let pin = NSMenuItem(
+            title: "Pin from Clipboard",
+            action: #selector(pinFromClipboardFromMenu),
+            keyEquivalent: ""
+        )
+        pin.target = self
+        pin.image = NSImage(systemSymbolName: "pin", accessibilityDescription: nil)
+        menu.addItem(pin)
+
+        let closePins = NSMenuItem(
+            title: pinboard.pinCount > 1 ? "Close All Pins (\(pinboard.pinCount))" : "Close All Pins",
+            action: #selector(closeAllPinsFromMenu),
+            keyEquivalent: ""
+        )
+        closePins.target = self
+        closePins.isEnabled = pinboard.hasPins
+        menu.addItem(closePins)
+
+        menu.addItem(.separator())
+
         let shortcut = NSMenuItem(
-            title: "Shortcut  \(store.settings.hotKey.displayString)  ·  press anywhere",
+            title: "Screenshot  \(store.settings.hotKey.displayString)      Pin  \(store.settings.pinHotKey.displayString)",
             action: nil,
             keyEquivalent: ""
         )
@@ -180,6 +223,49 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshMenu() {
         statusItem?.menu = buildMenu()
+    }
+
+    /// Apply the configured *pin* shortcut, rolling back independently of the capture shortcut.
+    ///
+    /// Kept separate on purpose: F3 is Mission Control's factory binding, so this registration is
+    /// the one most likely to fail, and its failure must not disturb ⌥⇧5.
+    private func registerPinHotKey(previous: HotKeyCombo? = GlobalHotKeyMonitor.shared.combo(in: .pinFromClipboard)) {
+        let desired = store.settings.pinHotKey
+        let outcome = HotKeyRegistrationPolicy.apply(desired: desired, previous: previous) { combo in
+            GlobalHotKeyMonitor.shared.register(
+                combo,
+                in: .pinFromClipboard,
+                allowingNoModifiers: combo.isAllowedAsBareKey
+            ) { [weak self] in
+                Task { @MainActor in self?.pinFromClipboard() }
+            }
+        }
+
+        if outcome.rolledBack, let active = outcome.active {
+            isRollingBackHotKey = true
+            store.settings.pinHotKey = active
+            isRollingBackHotKey = false
+            presentAlert(
+                title: "Pin shortcut unavailable",
+                message: "Another app already uses \(desired.displayString), so TriCap kept \(active.displayString). Pick a different pin shortcut in Settings."
+            )
+        } else if outcome.lostShortcut {
+            presentAlert(
+                title: "Pin shortcut unavailable",
+                message: pinShortcutUnavailableMessage(desired)
+            )
+        }
+        refreshMenu()
+    }
+
+    /// F3 is Mission Control's default, and macOS gives the key to whoever registered first — so
+    /// say which key failed and what to do, rather than silently binding something else.
+    private func pinShortcutUnavailableMessage(_ combo: HotKeyCombo) -> String {
+        let base = "TriCap could not claim \(combo.displayString) for pinning."
+        let missionControl = combo == .defaultPin
+            ? " On Apple keyboards F3 is Mission Control by default; either turn that off under System Settings → Keyboard → Keyboard Shortcuts → Mission Control, or pick a different key here."
+            : " Another application already owns it."
+        return base + missionControl + " Use “Pin from Clipboard” in the menu meanwhile."
     }
 
     /// Apply the configured shortcut, rolling back to the previous one if the new one is taken.
@@ -216,7 +302,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Menu actions
 
     @objc private func captureRegion() { beginCapture(mode: .still) }
+    @objc private func captureRegionAndEdit() { beginCapture(mode: .still, forceEditor: true) }
     @objc private func recordRegion() { beginCapture(mode: .recording) }
+
+    // MARK: - Pinning
+
+    @objc private func pinFromClipboardFromMenu() { pinFromClipboard() }
+    @objc private func closeAllPinsFromMenu() { pinboard.closeAll() }
+
+    /// Pin the clipboard image, and say why when there is nothing to pin.
+    ///
+    /// Never creates an empty window: a floating rectangle with no content cannot explain itself,
+    /// so an empty or non-image clipboard produces a one-line notice instead.
+    private func pinFromClipboard() {
+        let outcome = pinboard.pinFromClipboard()
+        if outcome.isSuccess {
+            toast.showNotice(outcome.userMessage, systemImage: "pin.fill", isWarning: false)
+        } else {
+            toast.showNotice(outcome.userMessage, systemImage: "photo.badge.exclamationmark", isWarning: true)
+        }
+        refreshMenu()
+    }
 
     @objc private func openPermissionSettings() {
         ScreenRecordingPermission.openSystemSettings()
@@ -239,6 +345,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let view = WelcomeView(
             shortcut: store.settings.hotKey,
+            pinShortcut: store.settings.pinHotKey,
             permissionStatus: ScreenRecordingPermission.authorizationStatus(),
             onGrantPermission: { [weak self] in
                 _ = ScreenRecordingPermission.request()
@@ -313,7 +420,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// has been fully torn down. `recordClip` therefore awaits `RecordingSession.run()` rather
     /// than returning as soon as the HUD is on screen — which is what previously let a second
     /// trigger overwrite the live recorder, HUD, stop target and cancel key.
-    private func beginCapture(mode: RegionSelector.CaptureMode) {
+    private func beginCapture(mode: RegionSelector.CaptureMode, forceEditor: Bool = false) {
         guard gate.tryBegin() else { return }
         toast.dismiss()
         refreshMenu()
@@ -328,9 +435,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard await ensurePermission() else { return }
 
+            // Snapshot the window list before the overlay covers everything, so a single click
+            // can capture the window the pointer is over.
+            let windows = await WindowSurvey.currentWindows()
+
             let selector = RegionSelector()
             self.selector = selector
-            let outcome = await selector.selectRegion(initialMode: mode)
+            let outcome = await selector.selectRegion(initialMode: mode, windowCandidates: windows)
             self.selector = nil
 
             switch outcome {
@@ -338,14 +449,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 TriCapLog.app.info("capture cancelled at selection")
             case .selected(let region, .still):
                 gate.transition(to: .capturingStill)
-                await captureStill(region: region)
+                await captureStill(region: region, forceEditor: forceEditor)
             case .selected(let region, .recording):
                 await recordClip(region: region)
             }
         }
     }
 
-    private func captureStill(region: CaptureRegion) async {
+    private func captureStill(region: CaptureRegion, forceEditor: Bool) async {
         // Give the window server one turn to actually remove the overlay before we sample the
         // screen. The content filter already excludes TriCap, but this also avoids catching the
         // dimming layer's fade-out on slower machines.
@@ -353,9 +464,52 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let still = try await StillCaptureService.capture(region: region)
-            presentEditor(source: .still(still))
+
+            // The common case is "capture, then paste", so that is the default: no window, no
+            // file on disk until the user asks for one. `forceEditor` is the menu's
+            // "Screenshot and Edit…", which overrides the setting for one capture.
+            let action = forceEditor ? .openEditor : store.settings.stillCaptureAction
+            switch action {
+            case .openEditor:
+                presentEditor(source: .still(still))
+            case .copyToClipboard:
+                copyStillToClipboard(still)
+            }
         } catch {
             presentCaptureError(error)
+        }
+    }
+
+    /// Put a finished screenshot on the clipboard, and only claim success if it got there.
+    private func copyStillToClipboard(_ still: CapturedStill) {
+        guard let receipt = PasteboardImage.write(still.image) else {
+            // A refused pasteboard write is recoverable: the capture is still in memory, so offer
+            // the editor rather than dropping it on the floor.
+            presentClipboardFailure(still)
+            return
+        }
+
+        var message = "Copied \(still.image.width) × \(still.image.height)"
+        if let notice = still.colorSpace.userFacingNotice {
+            toast.showNotice(notice, systemImage: "paintpalette", isWarning: true)
+        } else {
+            if !receipt.wroteRasterData { message += " (image only)" }
+            toast.showNotice(message, systemImage: "checkmark.circle.fill", isWarning: false)
+        }
+        TriCapLog.app.info("screenshot copied to clipboard: \(receipt.types.joined(separator: ","), privacy: .public)")
+    }
+
+    private func presentClipboardFailure(_ still: CapturedStill) {
+        TriCapLog.app.error("clipboard write refused every representation")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not copy the screenshot"
+        alert.informativeText = "The clipboard refused the image. The capture is still open — you can annotate and save it instead."
+        alert.addButton(withTitle: "Open Editor")
+        alert.addButton(withTitle: "Discard")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            presentEditor(source: .still(still))
         }
     }
 

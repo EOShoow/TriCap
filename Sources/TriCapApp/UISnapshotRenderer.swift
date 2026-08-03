@@ -1,0 +1,415 @@
+import AnnotationCore
+import AppKit
+import CaptureCore
+import CoreGraphics
+import Foundation
+import SelectionUI
+import SwiftUI
+import TriCapKit
+
+/// Offscreen renderer for TriCap's own UI, invoked as `TriCap --render-ui-snapshots <directory>`.
+///
+/// It exists so the interface can be inspected — and regressions caught — on a machine where
+/// nobody is watching the screen and where granting Screen Recording to a screenshot tool is not
+/// possible. Every image it writes is the *real* view hierarchy (`SettingsView`, `EditorView`,
+/// `SelectionOverlayView`, the recording HUD) drawn through AppKit's normal display path; nothing
+/// here is a mock-up. The one thing it cannot show is the menu-bar dropdown, which only the
+/// window server can render.
+@MainActor
+enum UISnapshotRenderer {
+
+    static let flag = "--render-ui-snapshots"
+
+    /// Runs the renderer if the flag is present. Returns `true` if the process should exit.
+    static func runIfRequested(arguments: [String]) -> Bool {
+        guard let index = arguments.firstIndex(of: flag) else { return false }
+        let directory = index + 1 < arguments.count
+            ? URL(fileURLWithPath: arguments[index + 1], isDirectory: true)
+            : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("ui-snapshots")
+
+        do {
+            try render(into: directory)
+            print("wrote UI snapshots to \(directory.path)")
+        } catch {
+            FileHandle.standardError.write(Data("snapshot render failed: \(error)\n".utf8))
+            exit(1)
+        }
+        return true
+    }
+
+    static func render(into directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let store = SettingsStore(defaults: snapshotDefaults())
+
+        try write(
+            hosting(SettingsView(store: store), size: CGSize(width: 520, height: 430)),
+            to: directory.appendingPathComponent("01-settings-general.png")
+        )
+
+        let still = syntheticStill()
+        let stillModel = EditorModel(source: .still(still), settings: store.settings, onExported: { _ in }, onClosed: {})
+        stillModel.document.add(
+            AnnotationItem(
+                shape: .arrow(from: CGPoint(x: 120, y: 340), to: CGPoint(x: 430, y: 170)),
+                style: AnnotationStyle(color: .red, lineWidth: 8)
+            )
+        )
+        stillModel.document.add(
+            AnnotationItem(
+                shape: .rectangle(CGRect(x: 400, y: 120, width: 300, height: 110)),
+                style: AnnotationStyle(color: .yellow, lineWidth: 8)
+            )
+        )
+        stillModel.document.add(
+            AnnotationItem(
+                shape: .text(origin: CGPoint(x: 120, y: 380), string: "annotate me"),
+                style: AnnotationStyle(color: .blue, fontSize: 44)
+            )
+        )
+        stillModel.document.add(
+            AnnotationItem(
+                shape: .mosaic(CGRect(x: 90, y: 430, width: 320, height: 90)),
+                style: AnnotationStyle(mosaicBlockSize: 18)
+            )
+        )
+        try write(
+            hosting(EditorView(model: stillModel), size: CGSize(width: 900, height: 700)),
+            to: directory.appendingPathComponent("02-editor-still.png")
+        )
+
+        let clipModel = EditorModel(source: .clip(syntheticClip()), settings: store.settings, onExported: { _ in }, onClosed: {})
+        clipModel.trimStart = 2
+        clipModel.trimEnd = 9
+        clipModel.previewIndex = 5
+        clipModel.tool = .mosaic
+        try write(
+            hosting(EditorView(model: clipModel), size: CGSize(width: 900, height: 760)),
+            to: directory.appendingPathComponent("03-editor-clip-trim.png")
+        )
+
+        try write(selectionOverlaySnapshot(), to: directory.appendingPathComponent("04-selection-overlay.png"))
+        try write(recordingHUDSnapshot(), to: directory.appendingPathComponent("05-recording-hud.png"))
+        try write(menuBarSnapshot(), to: directory.appendingPathComponent("06-menu-bar-item.png"))
+    }
+
+    // MARK: - Individual snapshots
+
+    /// The real ``SelectionOverlayView`` with a live selection, over a synthetic desktop.
+    private static func selectionOverlaySnapshot() throws -> NSBitmapImageRep {
+        let size = CGSize(width: 900, height: 560)
+        let container = offscreenContainer(size: size)
+        let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
+
+        let overlay = SelectionOverlayView(frame: container.bounds)
+        overlay.hintText = RegionSelector.CaptureMode.recording.hint
+        overlay.isRecordingMode = true
+        container.addSubview(overlay)
+
+        // The overlay interprets its selection in AppKit *global* points and converts through its
+        // window, so the rect has to be offset by the (deliberately off-screen) window origin —
+        // exactly the conversion the live overlay performs during a drag.
+        let windowOrigin = container.window?.frame.origin ?? .zero
+        overlay.globalSelection = CGRect(
+            x: windowOrigin.x + 210,
+            y: windowOrigin.y + 150,
+            width: 470,
+            height: 260
+        )
+        overlay.selectionPixelSize = CGSize(width: 940, height: 520)
+
+        settle(container)
+        return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
+    }
+
+    /// A stand-in for the floating recording HUD, built from the same pieces the live HUD uses.
+    private static func recordingHUDSnapshot() throws -> NSBitmapImageRep {
+        let size = CGSize(width: 268, height: 56)
+        let content = offscreenContainer(size: size)
+        content.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        content.layer?.cornerRadius = 12
+
+        let dot = NSView(frame: CGRect(x: 16, y: 24, width: 10, height: 10))
+        dot.wantsLayer = true
+        dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        dot.layer?.cornerRadius = 5
+        content.addSubview(dot)
+
+        let elapsed = NSTextField(labelWithString: "4.2 s / 15 s")
+        elapsed.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        elapsed.textColor = .white
+        elapsed.frame = CGRect(x: 34, y: 28, width: 150, height: 20)
+        content.addSubview(elapsed)
+
+        let frames = NSTextField(labelWithString: "51 frames · 12 MB")
+        frames.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        frames.textColor = NSColor.white.withAlphaComponent(0.7)
+        frames.frame = CGRect(x: 34, y: 10, width: 150, height: 16)
+        content.addSubview(frames)
+
+        let stop = NSButton(title: "Stop", target: nil, action: nil)
+        stop.bezelStyle = .rounded
+        stop.frame = CGRect(x: 196, y: 14, width: 58, height: 28)
+        content.addSubview(stop)
+
+        settle(content)
+        return try bitmap(of: content)
+    }
+
+    /// The status item's template image at menu-bar size, on a menu-bar-like strip.
+    private static func menuBarSnapshot() throws -> NSBitmapImageRep {
+        let size = CGSize(width: 240, height: 32)
+        let container = offscreenContainer(size: size)
+        container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        let imageView = NSImageView(frame: CGRect(x: 12, y: 6, width: 20, height: 20))
+        let symbol = NSImage(systemSymbolName: "viewfinder.rectangular", accessibilityDescription: "TriCap")
+        symbol?.isTemplate = true
+        imageView.image = symbol
+        imageView.contentTintColor = .labelColor
+        container.addSubview(imageView)
+
+        let label = NSTextField(labelWithString: "TriCap status item (⌥⇧5)")
+        label.font = .systemFont(ofSize: 12)
+        label.frame = CGRect(x: 40, y: 8, width: 200, height: 16)
+        container.addSubview(label)
+
+        settle(container)
+        return try bitmap(of: container)
+    }
+
+    // MARK: - Plumbing
+
+    /// Host a SwiftUI view in a real (never-ordered-front) window.
+    ///
+    /// SwiftUI only resolves a layout once its host is attached to a window and the run loop has
+    /// turned; snapshotting a detached `NSHostingView` yields a half-laid-out toolbar. The window
+    /// is created off-screen and never ordered front, so nothing appears on the user's display.
+    private static func hosting<V: View>(_ view: V, size: CGSize) -> NSView {
+        let window = NSWindow(
+            contentRect: NSRect(origin: CGPoint(x: -10_000, y: -10_000), size: size),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(origin: .zero, size: size)
+        window.contentView = hosting
+        window.setContentSize(size)
+        window.layoutIfNeeded()
+
+        for _ in 0..<25 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            window.layoutIfNeeded()
+            hosting.layoutSubtreeIfNeeded()
+        }
+        snapshotWindows.append(window)
+        return hosting
+    }
+
+    /// Keeps snapshot windows alive until the process exits; releasing one mid-render tears down
+    /// the hosting view before `cacheDisplay` has run.
+    private static var snapshotWindows: [NSWindow] = []
+
+    /// A layer-backed content view inside an off-screen window.
+    ///
+    /// Attaching to a window makes AppKit turn on layer backing for the whole subtree, so every
+    /// custom `draw(_:)` view ends up with layer contents that `CALayer.render(in:)` can capture.
+    /// A detached view hierarchy renders as an empty rectangle instead.
+    private static func offscreenContainer(size: CGSize) -> NSView {
+        let window = NSWindow(
+            contentRect: NSRect(origin: CGPoint(x: -10_000, y: -10_000), size: size),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let content = NSView(frame: NSRect(origin: .zero, size: size))
+        content.wantsLayer = true
+        window.contentView = content
+        snapshotWindows.append(window)
+        return content
+    }
+
+    /// Give AppKit a few run-loop turns to draw a freshly-populated offscreen hierarchy.
+    private static func settle(_ view: NSView) {
+        view.needsDisplay = true
+        for _ in 0..<10 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
+        }
+    }
+
+    /// Snapshot a view hierarchy to a bitmap.
+    ///
+    /// `cacheDisplay(in:to:)` walks the `draw(_:)` path, which captures TriCap's own custom views
+    /// perfectly but misses AppKit controls that render through Core Animation (segmented
+    /// controls, sliders, push buttons — i.e. most of what SwiftUI produces). Rendering the layer
+    /// tree instead picks those up, so layer-backed hierarchies go through `CALayer.render(in:)`
+    /// and everything else keeps the `draw(_:)` path.
+    private static func bitmap(of view: NSView, background: NSColor? = .windowBackgroundColor) throws -> NSBitmapImageRep {
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            throw TriCapError.encodingFailed("bitmapImageRepForCachingDisplay returned nil")
+        }
+
+        if let layer = view.layer, let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            let cg = context.cgContext
+            cg.clear(CGRect(origin: .zero, size: view.bounds.size))
+            if let background {
+                cg.setFillColor(background.cgColor)
+                cg.fill(view.bounds)
+            }
+            // `CALayer.render(in:)` draws in the layer's own geometry and ignores
+            // `isGeometryFlipped`. AppKit flips the layer geometry for views whose `isFlipped` is
+            // true (every `NSHostingView`), so exactly those need the context flipped back;
+            // plain bottom-left-origin views must not be flipped or they come out upside down.
+            if view.isFlipped {
+                cg.translateBy(x: 0, y: view.bounds.height)
+                cg.scaleBy(x: 1, y: -1)
+            }
+            layer.render(in: cg)
+            NSGraphicsContext.restoreGraphicsState()
+            return rep
+        }
+
+        view.cacheDisplay(in: view.bounds, to: rep)
+        return rep
+    }
+
+    /// Composite `overlay` (with alpha) over `base`.
+    ///
+    /// The live selection overlay is the content view of a fully transparent window, so its
+    /// punched-out region reveals the real screen underneath. Reproducing that offscreen means
+    /// rendering the overlay on its own and compositing it here, rather than stacking it on a
+    /// backdrop view inside one opaque layer tree (which would fill the punch-out with black).
+    private static func composite(base: CGImage, overlay: NSBitmapImageRep) throws -> NSBitmapImageRep {
+        let width = base.width
+        let height = base.height
+        guard let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: ImageProcessing.outputColorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else {
+            throw TriCapError.encodingFailed("could not allocate the compositing context")
+        }
+        ctx.draw(base, in: CGRect(x: 0, y: 0, width: width, height: height))
+        if let overlayImage = overlay.cgImage {
+            ctx.draw(overlayImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        guard let merged = ctx.makeImage() else {
+            throw TriCapError.encodingFailed("compositing produced no image")
+        }
+        return NSBitmapImageRep(cgImage: merged)
+    }
+
+    private static func write(_ view: NSView, to url: URL) throws {
+        try write(try bitmap(of: view), to: url)
+    }
+
+    private static func write(_ rep: NSBitmapImageRep, to url: URL) throws {
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            throw TriCapError.encodingFailed("PNG representation failed for \(url.lastPathComponent)")
+        }
+        try data.write(to: url)
+    }
+
+    /// Snapshots must never disturb the user's real preferences.
+    private static func snapshotDefaults() -> UserDefaults {
+        let suite = UserDefaults(suiteName: "app.tricap.ui-snapshots")!
+        suite.removePersistentDomain(forName: "app.tricap.ui-snapshots")
+        return suite
+    }
+
+    // MARK: - Synthetic content
+
+    /// A recognisable stand-in for a real screen capture.
+    private static func syntheticDesktop(width: Int, height: Int) -> CGImage {
+        let ctx = ImageProcessing.makeContext(width: width, height: height)!
+        let colors = [
+            CGColor(red: 0.16, green: 0.20, blue: 0.32, alpha: 1),
+            CGColor(red: 0.30, green: 0.44, blue: 0.62, alpha: 1),
+        ] as CFArray
+        if let gradient = CGGradient(colorsSpace: ImageProcessing.outputColorSpace, colors: colors, locations: [0, 1]) {
+            ctx.drawLinearGradient(
+                gradient,
+                start: .zero,
+                end: CGPoint(x: width, y: height),
+                options: []
+            )
+        }
+        ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.18))
+        ctx.setLineWidth(1)
+        for x in stride(from: 0, to: width, by: 40) {
+            ctx.move(to: CGPoint(x: x, y: 0)); ctx.addLine(to: CGPoint(x: x, y: height))
+        }
+        for y in stride(from: 0, to: height, by: 40) {
+            ctx.move(to: CGPoint(x: 0, y: y)); ctx.addLine(to: CGPoint(x: width, y: y))
+        }
+        ctx.strokePath()
+
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.9))
+        ctx.fill(CGRect(x: 80, y: height - 200, width: 300, height: 60))
+        ctx.setFillColor(CGColor(red: 0.95, green: 0.75, blue: 0.25, alpha: 0.95))
+        ctx.fill(CGRect(x: 420, y: height - 320, width: 220, height: 150))
+        return ctx.makeImage()!
+    }
+
+    private static func syntheticStill() -> CapturedStill {
+        let image = syntheticDesktop(width: 940, height: 620)
+        return CapturedStill(
+            image: image,
+            region: snapshotRegion(pixelWidth: 940, pixelHeight: 620),
+            colorSpace: ImageProcessing.ColorSpaceOutcome(
+                sourceName: "kCGColorSpaceSRGB",
+                converted: false,
+                wasWideGamutOrHDR: false
+            )
+        )
+    }
+
+    private static func syntheticClip() -> RecordedClip {
+        let frames: [RecordedFrame] = (0..<12).map { index in
+            let ctx = ImageProcessing.makeContext(width: 640, height: 400)!
+            ctx.draw(syntheticDesktop(width: 640, height: 400), in: CGRect(x: 0, y: 0, width: 640, height: 400))
+            ctx.setFillColor(CGColor(red: 0.95, green: 0.28, blue: 0.24, alpha: 1))
+            ctx.fill(CGRect(x: 40 + index * 45, y: 170, width: 60, height: 60))
+            let image = ctx.makeImage()!
+            return RecordedFrame(pngData: ImageProcessing.pngData(from: image)!, timestamp: Double(index) / 12.0)
+        }
+        return RecordedClip(
+            frames: frames,
+            pixelSize: CGSize(width: 640, height: 400),
+            region: snapshotRegion(pixelWidth: 640, pixelHeight: 400),
+            nominalFrameInterval: 1.0 / 12.0,
+            stopReason: .userStopped,
+            droppedFrameCount: 0,
+            colorSpace: nil,
+            retainedBytes: frames.reduce(0) { $0 + $1.pngData.count }
+        )
+    }
+
+    private static func snapshotRegion(pixelWidth: Int, pixelHeight: Int) -> CaptureRegion {
+        let display = DisplayGeometry(
+            displayID: 1,
+            appKitBounds: CGRect(x: 0, y: 0, width: 1512, height: 982),
+            quartzBounds: CGRect(x: 0, y: 0, width: 1512, height: 982),
+            pointPixelScale: 2.0,
+            primaryHeightInPoints: 982
+        )
+        return CaptureRegion(
+            display: display,
+            appKitGlobalRect: CGRect(x: 100, y: 100, width: CGFloat(pixelWidth) / 2, height: CGFloat(pixelHeight) / 2),
+            displayPixelRect: CGRect(x: 200, y: 200, width: CGFloat(pixelWidth), height: CGFloat(pixelHeight)),
+            sourceRectInDisplayPoints: CGRect(x: 100, y: 100, width: CGFloat(pixelWidth) / 2, height: CGFloat(pixelHeight) / 2)
+        )
+    }
+}

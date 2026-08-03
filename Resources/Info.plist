@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>TriCap</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.tricap.TriCap</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>TriCap</string>
+	<key>CFBundleDisplayName</key>
+	<string>TriCap</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- Menu-bar only: no Dock icon, no default main window. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>TriCap. Includes libwebp (BSD-3-Clause) — see THIRD_PARTY_LICENSES.md.</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+	<!--
+	  Screen &amp; System Audio Recording has no Info.plist usage-description key on macOS: the
+	  prompt text is supplied by the system. TriCap requests it through
+	  CGRequestScreenCaptureAccess() and reads it back with CGPreflightScreenCaptureAccess().
+	  No microphone, camera, location, contacts or network entitlement is requested — TriCap
+	  never records audio and never talks to the network.
+	-->
+</dict>
+</plist>

@@ -134,6 +134,42 @@ discarded the user's entire settings blob. Enum fields now decode tolerantly
 | 3 | `isSelectable` allowed `level <= 0` and `snapEdges` was built from the **raw** candidate list, so the Finder desktop, wallpaper windows, `underbelly` and Display Backstop became hover targets and snap lines. | `level == WindowPicker.ordinaryApplicationLayer` (0 exactly); `WindowPicker.snapEdges` derives from the same filter, and `RegionSelector` builds `candidates` and `snapEdges` from it. Display bounds are still always included. | *Window picking* (+3), *Snap edges come from the same filtered list* (5) · selftest lists this machine's real levels and asserts the filter |
 | 4 | `copyStillToClipboard` showed *only* the colour advisory on a P3/HDR display, so the common path on a modern Mac never said the screenshot had been copied. | [ClipboardCopyNotice](Sources/ExportCore/PasteboardImage.swift) always leads with `Copied W × H`; a colour advisory is appended to the same notice, never substituted. | *Clipboard copy notice* (7, covering sRGB, P3/HDR, image-only, and both together) |
 
+## Round 7 — HUD placement and export performance
+
+### A. The recording HUD could land off screen
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| P1 | Reproduce with a pure-geometry probe before changing anything | [hud-placement-probe.swift](scripts/diagnostics/hud-placement-probe.swift) — full screen, ≥90% height, flush top/bottom, small screens, negative-coordinate secondary | **8 of 12 realistic selections landed outside the visible frame** on this machine, plain full-screen included |
+| P2 | A testable placement policy against the *matching* screen's `visibleFrame`, never main by default | [HUDPlacement.swift](Sources/TriCapKit/HUDPlacement.swift); `RecordingHUD.visibleFrame(for:)` matches by `CGDirectDisplayID` | *HUD placement* (15) · selftest against every attached display |
+| P3 | Order: outside-below → outside-above → inside → always within a safe inset | `HUDPlacement.place`, `Strategy` names the branch taken | *HUD placement* — `prefersBelow`, `fallsBackToAbove`, `fallsBackToInside`, 300-case sweep |
+| P4 | The countdown too | `HUDPlacement.placeCentred` | *HUD placement* — `countdownNearTheMenuBar`, `countdownSweep` |
+| P5 | Stop is hit-testable and one click stops once | `HUDStopProxy` latches; `stopButton` exposed for hit-testing | selftest — `hitTest` returns the button; three clicks → one stop |
+| P6 | Near-full-screen snapshot; the old logic must fail the tests | snapshot `15-hud-placement-near-fullscreen.png` | reverting to the old algorithm fails 6 tests / 140 sweep cases (recorded in REVIEW_HANDOFF §0.000) |
+| P7 | `sharingType = .none`, TriCap excluded from capture, window level unchanged | untouched in `makeFloatingWindow` | code review · the HUD is still absent from every recorded frame in the selftest |
+
+### B. Animated WebP export took far too long
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| Q1 | Baseline on identical high-motion material, ≥3 runs, median | `TriCap --benchmark-export`, paced at the real frame interval | 1440×900, 181 frames: **median 177.0 s** [163.1, 177.0, 238.6] |
+| Q2 | Find the real cost before optimising | per-frame profile in the benchmark | `WebPAnimEncoderAdd` **857 ms/frame**; PNG decode 0.1 ms, pixel extraction 8.7 ms, assemble 0.2 ms total |
+| Q3 | Encode during recording, libwebp touched only on one serial context, never in the SCK callback | [LivePreEncoder.swift](Sources/ExportCore/LivePreEncoder.swift) + [WebPAnimEncoderSession.swift](Sources/ExportCore/WebPAnimEncoderSession.swift); fed by `RegionRecorder.onFrameAccepted` outside the frame lock | *Live pre-encoder* (12), *Long-lived WebP animation encoder* (8) · selftest |
+| Q4 | Bounded queue; backlog or failure abandons the fast path without blocking capture, growing memory, or losing material | `maxBacklog`, `Abandonment`, PNG frames untouched throughout | *Live pre-encoder* — `backlogAbandons`, `backlogIsBounded` · selftest forces a backlog |
+| Q5 | Cancel, auto-stop, encode failure and quit all release the encoder | `LivePreEncoder.cancel()`, `deinit`, `AppDelegate.applicationWillTerminate` | *Live pre-encoder* — `cancelReleases`, `cancelIsIdempotent`, `submitAfterCancel` · selftest |
+| Q6 | Reuse only for full range + no annotations + unchanged canvas/quality/lossless/method/loop/timeline | [PreEncodeReuse](Sources/ExportCore/PreEncodedAnimation.swift) — a pure function defaulting to *no* | *Pre-encode reuse policy* (10) · selftest exercises every fallback |
+| Q7 | Trim, annotate and parameter changes still go through per-frame encoding | `ExportService.exportAnimation` branches on the decision only | selftest — the trimmed export is a valid animation of the trimmed length |
+| Q8 | Frame-count bounds, playback length, loop, colour notice, static collapse and post-write verification all preserved | untouched; both routes share the same verification | selftest — the two paths agree on canvas, frame count, playback length, every timestamp and loop count |
+| Q9 | ≥50% median tail-latency reduction, or data proving otherwise | `AnimationEncodeStrategy.balanced` + pre-encoding | **177.0 s → 0.85 s, a 99.5% reduction.** Strategy alone accounts for 93.6%; pre-encoding takes the remainder |
+| Q10 | Report in-recording cost separately from tail latency | benchmark measures frame lateness against the delivery slot | worst lateness 0.2 ms, **0 dropped frames** in all three arms |
+| Q11 | selftest covers fast-path hit, every fallback, forced backlog, cancel cleanup, output consistency and a perf diagnostic | `--selftest` §Live pre-encoding | 21 checks, all passing |
+
+The one thing that could **not** be computed live is the animation's end timestamp: it depends on
+the measured wall-clock duration, which is only final once capture stops. Per-frame timestamps are
+computed by [IncrementalTimeline](Sources/TriCapKit/IncrementalTimeline.swift), the single rule
+`ClipTiming` also runs — pinned by *Live and batch timelines agree* (3), because a one-millisecond
+divergence would make the pre-encoded file silently wrong for the timeline it claims.
+
 ## Deliverables
 
 | Deliverable | Location |
@@ -142,6 +178,7 @@ discarded the user's entire settings blob. Enum fields now decode tolerantly
 | README (features, build, run, permission, usage, limits) | [README.md](README.md) |
 | Architecture / requirements docs | [ARCHITECTURE.md](ARCHITECTURE.md), this file |
 | libwebp licence and integration notes | [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), [docs/LIBWEBP.md](docs/LIBWEBP.md) |
-| Automated tests | `Tests/TriCapTests/` (369), `./scripts/test.sh` |
+| Automated tests | `Tests/TriCapTests/` (418), `./scripts/test.sh` |
 | App icon source and outputs | [scripts/generate-icon.swift](scripts/generate-icon.swift), `Resources/AppIcon/` |
+| Export performance harness | `TriCap --benchmark-export` ([ExportBenchmark.swift](Sources/TriCapApp/ExportBenchmark.swift)) |
 | Review handoff | [REVIEW_HANDOFF.md](REVIEW_HANDOFF.md) |

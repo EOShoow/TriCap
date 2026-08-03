@@ -127,18 +127,12 @@ public enum ClipTiming {
     ) -> FrameTimeline? {
         guard !frames.isEmpty else { return nil }
         let minStep = max(1, minimumFrameDurationMs)
-        let base = frames[0].timestamp
 
-        var timestamps: [Int] = []
-        timestamps.reserveCapacity(frames.count)
-        for frame in frames {
-            let raw = Int(((frame.timestamp - base) * 1000.0).rounded())
-            if let previous = timestamps.last {
-                timestamps.append(max(raw, previous + minStep))
-            } else {
-                timestamps.append(0)
-            }
-        }
+        // Shared with the live pre-encoder, which has to produce identical timestamps while the
+        // recording is still running — see `IncrementalTimeline`.
+        let timestamps = IncrementalTimeline.timestamps(
+            forCaptureTimestamps: frames.map(\.timestamp), minimumStepMs: minStep
+        )
 
         let lastTimestamp = timestamps[timestamps.count - 1]
         let nominalMs = max(minStep, Int((nominalFrameInterval * 1000.0).rounded()))

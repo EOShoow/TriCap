@@ -40,11 +40,11 @@ CaptureCore  SelectionUI  AnnotationCore  →  ExportCore
 | Target | Responsibility |
 |---|---|
 | `CWebP` | Vendored libwebp: dec, demux, dsp, enc, mux, utils, sharpyuv. One hand-written module map exposing only the public headers TriCap uses. |
-| `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging — plus the pure logic behind window-aware selection (`WindowPicker`, `SelectionGesture`, `SnapEngine`) and pinning (`PinLimits`, `PinPlacement`, `PinZoom`, `PinOpacity`, `PriorityHotKeyClaim`). |
+| `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging — plus the pure logic behind window-aware selection (`WindowPicker`, `SelectionGesture`, `SnapEngine`), pinning (`PinLimits`, `PinPlacement`, `PinZoom`, `PinOpacity`, `PinFocusOrder`, `PriorityHotKeyClaim`), chrome placement (`HUDPlacement`) and animation timing (`IncrementalTimeline`, `AnimationEncodeStrategy`). |
 | `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, the `RecordingSession` lifecycle and its `CaptureSessionGate`, `WindowSurvey`, clip trimming and WebP timeline construction. |
 | `SelectionUI` | The cross-display selection overlay: one borderless shielding-level window per screen, one shared global selection rect, window highlighting under the pointer, `R`/`S` mode switching, `Esc`/right-click cancel. |
 | `AnnotationCore` | Annotation model (`AnnotationItem`, `AnnotationShape`, `AnnotationStyle`), the snapshot-based `AnnotationDocument` with bounded undo/redo, and `AnnotationRenderer`. |
-| `ExportCore` | `WebPCodec` (the libwebp bridge), `StillImageCodec` + `MagicBytes`, `OutputFileWriter`, `MarkdownReference`, `PasteboardImage`, and `ExportService` which renders → encodes → writes → **re-reads and verifies**. |
+| `ExportCore` | `WebPCodec` (the libwebp bridge), `WebPAnimEncoderSession` + `LivePreEncoder` (encode-while-recording), `PreEncodeReuse`, `StillImageCodec` + `MagicBytes`, `OutputFileWriter`, `MarkdownReference`, `PasteboardImage`, and `ExportService` which renders → encodes → writes → **re-reads and verifies**. |
 | `TriCapApp` | Menu-bar item, global hot keys, settings, editor, recording HUD, pin windows (`PinWindow`, `PinboardController`), capture orchestration, plus two headless entry points (`--selftest`, `--render-ui-snapshots`). |
 
 ### Deviations from the suggested structure, and why
@@ -148,6 +148,73 @@ key back to whoever is underneath, and the registration is released only when th
 So a pin claims Escape, a recording pushes on top of it and takes Escape for its duration, and when
 the recording ends the pin gets Escape back. `SharedEscapeKey` holds the single process-wide claim,
 and both `RecordingChromeController` and `PinboardController` go through it.
+
+## Where the chrome goes
+
+The recording HUD is the only way to stop a recording with a click, so a HUD off the edge of the
+screen is a recording that cannot be ended except by waiting out the duration limit.
+
+`HUDPlacement` (TriCapKit, pure) tries four positions in order — outside-below, outside-above,
+inside-bottom, inside-top — and clamps whatever it picks into the target screen's **visible frame**,
+which excludes the menu bar and the Dock. Placing the HUD *inside* the selection is safe because
+the chrome is `sharingType = .none` and TriCap's own windows are excluded from the capture filter,
+so it is never recorded; it only covers what the user is watching. The countdown is centred on the
+selection and clamped the same way.
+
+The screen is resolved by matching `CGDirectDisplayID` against `NSScreen`, never by falling back to
+`NSScreen.main`: a recording on a secondary display must not put its Stop button on the primary one.
+
+The previous version preferred below, fell back to above *without checking whether that fit*, and
+never constrained y at all. `scripts/diagnostics/hud-placement-probe.swift` runs that algorithm over
+realistic selections and puts 8 of 12 outside the visible frame, plain full-screen capture included.
+
+## Export cost, and where the work happens
+
+Two changes, in the order the measurements forced them. Both are reproducible with
+`TriCap --benchmark-export`, which reports tail latency and in-recording cost separately because
+moving work into the recording can trade one for the other.
+
+### The encoder was doing far more work than asked
+
+Profiling a 1440×900 high-motion clip attributed **857 ms per frame** to `WebPAnimEncoderAdd`,
+against 0.1 ms for PNG decode and 8.7 ms for pixel extraction. Nothing else was worth looking at.
+
+The cause was two `WebPAnimEncoderOptions` flags, neither of them a user setting: `minimize_size`
+retries frames hunting for a smaller result, and `allow_mixed` encodes **every frame both lossily
+and losslessly** and keeps the smaller — and lossless encoding of a noisy megapixel frame is the
+most expensive operation in the pipeline. `AnimationEncodeStrategy` names both settings; the
+default is now `.balanced` with both off, and `.thorough` preserves the old behaviour for
+comparison. Measured: **873.7 ms → 45.6 ms per frame for 2.7% larger files.** The user's quality,
+method, lossless and loop settings are untouched.
+
+### Encoding while recording, when it is safe to
+
+At 45.6 ms per frame against an 83 ms capture interval, encoding now fits inside the interval —
+which is what makes pre-encoding possible at all. `LivePreEncoder` (ExportCore) owns a long-lived
+`WebPAnimEncoderSession` on one serial queue and is fed by `RegionRecorder.onFrameAccepted`, which
+fires outside the frame lock for exactly the frames the PNG buffer retains.
+
+It is never load-bearing. `submit` does no encoding on the capture path; at most `maxBacklog`
+frames may be waiting, and past that the fast path is **abandoned** rather than allowed to grow a
+second unbounded buffer beside the PNG one. Every failure — backlog, encoder error, cancellation,
+setup — is recorded and the export simply takes the route it always took, so nothing the user
+recorded can be lost by this path.
+
+Reuse is decided by `PreEncodeReuse`, a pure function that defaults to *no*. It requires the whole
+untrimmed range (same frame count **and** same timestamps), no annotations, the same canvas, all
+four encoder parameters unchanged, and the same end timestamp. Anything else — a trim, an
+annotation, a quality change — goes back through per-frame render-and-encode. Whichever route runs,
+the file is written, re-read and verified by the same code.
+
+The one thing that cannot be computed live is the **end** timestamp, because it depends on the
+measured wall-clock duration and is only final once capture stops. Per-frame timestamps can be, and
+`IncrementalTimeline` in TriCapKit is the single rule both `ClipTiming` and the pre-encoder run —
+a one-millisecond disagreement between them would make the pre-encoded file silently wrong for the
+timeline it claims.
+
+Measured at 1440×900, 181 frames (15 s at 12 fps), median of three, recording paced at the real
+frame interval: **177.0 s → 11.3 s** from the strategy change alone, **→ 0.85 s** with pre-encoding.
+Worst frame lateness 0.2 ms and no dropped frames in any arm.
 
 ## Quality presets
 
@@ -408,6 +475,9 @@ the overlay nor the recording HUD can end up inside a capture.
 
 - `--selftest <dir>` drives the whole real pipeline and exits non-zero on any failed check.
 - `--render-ui-snapshots <dir>` renders the real view hierarchies offscreen to PNG.
+- `--benchmark-export <dir> [--frames N] [--runs N] [--width W] [--height H]` measures animation
+  export against synthetic high-motion material, reporting tail latency and in-recording cost
+  separately for three configurations. See ARCHITECTURE.md §"Export cost".
 
 Both exist because the interactive flow needs a human at the keyboard while everything downstream
 of "the user dragged a rectangle" can be verified unattended — and because a reviewer needs one

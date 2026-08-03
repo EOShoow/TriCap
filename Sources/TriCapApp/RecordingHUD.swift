@@ -12,6 +12,8 @@ public final class RecordingHUD {
     private var countdownWindow: NSWindow?
     private var hudWindow: NSWindow?
     private var elapsedLabel: NSTextField?
+    /// The Stop button, so the self-test can hit-test it. Internal, not public.
+    private(set) var stopButton: NSButton?
     private var frameLabel: NSTextField?
     private var borderWindow: NSWindow?
     private var escapeNotice: NSTextField?
@@ -22,7 +24,8 @@ public final class RecordingHUD {
 
     /// One proxy per HUD instance. A shared singleton would let a second recording's HUD rebind
     /// the first one's Stop button.
-    private let stopProxy = HUDStopProxy()
+    /// Internal rather than private so the self-test can assert the one-stop-per-click rule.
+    let stopProxy = HUDStopProxy()
 
     public init() {}
 
@@ -119,7 +122,9 @@ public final class RecordingHUD {
         content.appearance = NSAppearance(named: .darkAqua)
 
         let stop = NSButton(title: "Stop", target: stopProxy, action: #selector(HUDStopProxy.fire))
+        stopProxy.rearm()
         stopProxy.handler = onStop
+        stopButton = stop
         stop.bezelStyle = .rounded
         // Deliberately no `keyEquivalent`. The HUD is a borderless, never-key floating panel, so a
         // key equivalent on it can never fire — advertising Return as a way to stop was a promise
@@ -185,6 +190,7 @@ public final class RecordingHUD {
         borderWindow = nil
         countdownWindow = nil
         elapsedLabel = nil
+        stopButton = nil
         frameLabel = nil
         escapeNotice = nil
         hintLabel = nil
@@ -233,24 +239,42 @@ public final class RecordingHUD {
     }
 
     private func makeFloatingWindow(size: CGSize, centeredOn region: CaptureRegion) -> NSWindow {
-        let rect = region.appKitGlobalRect
-        let origin = CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
-        return makeFloatingWindow(size: size, origin: origin)
+        let placement = HUDPlacement.placeCentred(
+            size: size,
+            over: region.appKitGlobalRect,
+            in: Self.visibleFrame(for: region)
+        )
+        return makeFloatingWindow(size: size, origin: placement.frame.origin)
     }
 
     private func makeFloatingWindow(size: CGSize, belowTopOf region: CaptureRegion) -> NSWindow {
-        let rect = region.appKitGlobalRect
-        // Prefer just below the region; fall back to just above when the region touches the
-        // bottom of its display.
-        var origin = CGPoint(x: rect.midX - size.width / 2, y: rect.minY - size.height - 12)
-        if origin.y < region.display.appKitBounds.minY + 8 {
-            origin.y = rect.maxY + 12
-        }
-        origin.x = min(
-            max(region.display.appKitBounds.minX + 8, origin.x),
-            region.display.appKitBounds.maxX - size.width - 8
+        let placement = HUDPlacement.place(
+            size: size,
+            over: region.appKitGlobalRect,
+            in: Self.visibleFrame(for: region)
         )
-        return makeFloatingWindow(size: size, origin: origin)
+        TriCapLog.app.debug(
+            "HUD placed \(placement.strategy.rawValue, privacy: .public) at \(placement.frame.debugDescription, privacy: .public)"
+        )
+        return makeFloatingWindow(size: size, origin: placement.frame.origin)
+    }
+
+    /// The visible frame of the screen the region is actually on.
+    ///
+    /// Matched by `CGDirectDisplayID` rather than by taking `NSScreen.main`: a recording on a
+    /// secondary display must not put its Stop button on the primary one. Falls back to whichever
+    /// screen contains the region, then to main, so a display disconnected mid-capture still
+    /// produces chrome somewhere reachable.
+    static func visibleFrame(for region: CaptureRegion) -> CGRect {
+        let wanted = region.display.displayID
+        let matching = NSScreen.screens.first { screen in
+            let number = screen.deviceDescription[.init("NSScreenNumber")] as? NSNumber
+            return number?.uint32Value == wanted
+        }
+        let screen = matching
+            ?? NSScreen.screens.first { $0.frame.intersects(region.appKitGlobalRect) }
+            ?? NSScreen.main
+        return screen?.visibleFrame ?? region.display.appKitBounds
     }
 
     private func makeFloatingWindow(size: CGSize, origin: CGPoint) -> NSWindow {
@@ -280,8 +304,25 @@ public final class RecordingHUD {
 /// `NSButton` needs an Objective-C target; this keeps the closure alive without leaking it.
 /// Deliberately *not* a singleton — see `RecordingHUD.stopProxy`.
 @MainActor
-private final class HUDStopProxy: NSObject {
+final class HUDStopProxy: NSObject {
     var handler: (() -> Void)?
+    /// How many clicks were delivered, including the ones swallowed. Exposed for the self-test.
+    private(set) var clickCount = 0
+    private var hasFired = false
 
-    @objc func fire() { handler?() }
+    /// Stopping is a one-way door. `RecordingSession` already latches its own stop, but the button
+    /// stays clickable for the moment between the click and the HUD disappearing, and a
+    /// double-click there should not queue a second stop for the *next* recording to inherit.
+    @objc func fire() {
+        clickCount += 1
+        guard !hasFired else { return }
+        hasFired = true
+        handler?()
+    }
+
+    /// Reset for a new recording. The proxy is per-`RecordingHUD`, but a HUD outlives one clip.
+    func rearm() {
+        hasFired = false
+        clickCount = 0
+    }
 }

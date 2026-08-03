@@ -44,6 +44,7 @@ final class EditorPresenter {
         settings: AppSettings,
         windowDelegate: NSWindowDelegate?,
         orderFront: Bool = true,
+        preEncoded: PreEncodedAnimation? = nil,
         onExported: @escaping (ExportResult) -> Void
     ) -> Handle {
         let box = WindowBox()
@@ -51,6 +52,7 @@ final class EditorPresenter {
         let model = EditorModel(
             source: source,
             settings: settings,
+            preEncoded: preEncoded,
             onExported: onExported,
             // `box` is captured strongly; `box.window` is weak, so the cycle is broken here.
             onClosed: { box.window?.close() }

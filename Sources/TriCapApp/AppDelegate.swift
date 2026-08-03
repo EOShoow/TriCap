@@ -35,6 +35,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The one live recording, if any. Owned by the running `Task` in `beginCapture`.
     private var recordingSession: RecordingSession?
 
+    /// The pre-encoder for the recording in flight, held only so quitting can release its libwebp
+    /// encoder rather than leaving it to a deinit that may never run.
+    private var livePreEncoder: LivePreEncoder?
+
     /// The single gate every capture entry point goes through. It stays occupied for the whole
     /// pipeline — selection, countdown, recording, teardown and the editor hand-off — so a second
     /// hot-key press or menu click while a recording is live is refused instead of overwriting the
@@ -81,6 +85,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        livePreEncoder?.cancel()
+        livePreEncoder = nil
         pinboard.closeAll()
         SharedEscapeKey.claim.reset()
         GlobalHotKeyMonitor.shared.unregisterAll()
@@ -524,8 +530,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let recorder = RegionRecorder(region: region, limits: limits)
+
+        // Encode frames as they arrive rather than all at once after Export. The pre-encoder is
+        // never load-bearing: if it falls behind, fails, or the user trims or annotates, the
+        // export takes the ordinary per-frame route and nothing is lost.
+        let preEncoder = LivePreEncoder(
+            canvasSize: recorder.pixelSize,
+            options: store.settings.animatedWebPOptions,
+            frameRate: limits.frameRate
+        )
+        livePreEncoder = preEncoder
+        recorder.onFrameAccepted = { [weak preEncoder] image, timestamp in
+            preEncoder?.submit(image: image, captureTimestamp: timestamp)
+        }
+
         let session = RecordingSession(
-            backend: RegionRecorder(region: region, limits: limits),
+            backend: recorder,
             chrome: chrome,
             region: region,
             limits: limits
@@ -544,12 +565,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        livePreEncoder = nil
         switch outcome {
         case .finished(let clip):
-            presentEditor(source: .clip(clip))
+            // The end timestamp is the one thing that cannot be known live: it depends on the
+            // measured wall-clock duration, which is only final once capture stops.
+            let endTimestampMs = ClipTiming.timeline(
+                for: clip.frames,
+                nominalFrameInterval: clip.nominalFrameInterval,
+                totalDuration: clip.duration
+            )?.endTimestampMs
+            var artifact: PreEncodedAnimation?
+            if let endTimestampMs {
+                // Draining can block, so it happens off the main actor. In practice the queue is
+                // nearly empty by now: encoding keeps up with capture.
+                artifact = await Task.detached(priority: .userInitiated) {
+                    preEncoder.finish(endTimestampMs: endTimestampMs)
+                }.value
+            } else {
+                preEncoder.cancel()
+            }
+            presentEditor(source: .clip(clip), preEncoded: artifact)
         case .cancelled:
+            preEncoder.cancel()
             TriCapLog.app.info("recording cancelled by user")
         case .failed(let error):
+            preEncoder.cancel()
             presentCaptureError(error)
         }
     }
@@ -598,11 +639,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Editor
 
-    private func presentEditor(source: EditorSource) {
+    private func presentEditor(source: EditorSource, preEncoded: PreEncodedAnimation? = nil) {
         editorPresenter.present(
             source: source,
             settings: store.settings,
             windowDelegate: self,
+            preEncoded: preEncoded,
             onExported: { [weak self] result in self?.handleExport(result) }
         )
     }

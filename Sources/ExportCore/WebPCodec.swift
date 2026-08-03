@@ -127,6 +127,7 @@ public enum WebPCodec {
         canvasSize: CGSize,
         endTimestampMs: Int,
         options: AnimatedWebPOptions,
+        strategy: AnimationEncodeStrategy = .default,
         progress: ((Double) -> Void)? = nil,
         nextFrame: (Int) throws -> (image: CGImage, timestampMs: Int)
     ) throws -> Data {
@@ -144,8 +145,8 @@ public enum WebPCodec {
         }
         encoderOptions.anim_params.loop_count = Int32(options.loopCount)  // 0 == loop forever
         encoderOptions.anim_params.bgcolor = 0xFFFFFFFF
-        encoderOptions.minimize_size = 1
-        encoderOptions.allow_mixed = options.lossless ? 0 : 1
+        encoderOptions.minimize_size = strategy.minimizeSize ? 1 : 0
+        encoderOptions.allow_mixed = (strategy.allowMixed && !options.lossless) ? 1 : 0
 
         guard let encoder = WebPAnimEncoderNew(width, height, &encoderOptions) else {
             throw TriCapError.encodingFailed("WebPAnimEncoderNew failed (canvas too large?).")
@@ -415,7 +416,9 @@ public enum WebPCodec {
 
     // MARK: - Helpers
 
-    private static func configure(_ config: inout WebPConfig, quality: Int, lossless: Bool, method: Int) throws {
+    /// Internal rather than private so `WebPAnimEncoderSession` configures its encoder through
+    /// exactly the same code — the streaming path and the live path must not drift apart.
+    static func configure(_ config: inout WebPConfig, quality: Int, lossless: Bool, method: Int) throws {
         if lossless {
             guard WebPConfigLosslessPreset(&config, Int32(method.clamped(to: 0...9))) != 0 else {
                 throw TriCapError.encodingFailed("WebPConfigLosslessPreset rejected the settings.")

@@ -147,6 +147,12 @@ enum UISnapshotRenderer {
             windowHighlightSnapshot(),
             to: directory.appendingPathComponent("14-selection-window-highlight.png")
         )
+        // Where the chrome lands for a near-full-screen recording — the case that used to put the
+        // Stop button off the top of the display.
+        try write(
+            hudPlacementSnapshot(),
+            to: directory.appendingPathComponent("15-hud-placement-near-fullscreen.png")
+        )
         try write(countdownSnapshot(), to: directory.appendingPathComponent("12-recording-countdown.png"))
         try write(recordingHUDSnapshot(), to: directory.appendingPathComponent("05-recording-hud.png"))
         try write(menuBarSnapshot(), to: directory.appendingPathComponent("06-menu-bar-item.png"))
@@ -202,6 +208,78 @@ enum UISnapshotRenderer {
 
         settle(container)
         return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
+    }
+
+    /// A scale drawing of where the chrome ends up for a near-full-screen selection.
+    ///
+    /// The HUD itself is the real one, built by `RecordingHUD.populateHUD`; what this adds is the
+    /// *context* a plain HUD screenshot cannot show — the display, its visible frame, the
+    /// selection, and the resulting placement. That relationship is the thing that was broken, so
+    /// it is the thing worth looking at.
+    private static func hudPlacementSnapshot() throws -> NSBitmapImageRep {
+        // A small display drawn 1:1, so the real 300×74 HUD is in true proportion to it. Scaling
+        // the display but not the HUD would make the picture lie about whether it fits.
+        let displayBounds = CGRect(x: 0, y: 0, width: 900, height: 560)
+        let visibleFrame = CGRect(x: 0, y: 20, width: 900, height: 510)   // menu bar + Dock
+        let region = CGRect(x: 0, y: 0, width: 900, height: 526)          // 94% tall, flush bottom
+
+        let placement = HUDPlacement.place(
+            size: RecordingHUD.hudSize, over: region, in: visibleFrame
+        )
+
+        let size = CGSize(width: displayBounds.width, height: displayBounds.height + 34)
+        let container = offscreenContainer(size: size)
+        container.appearance = NSAppearance(named: .darkAqua)
+        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.09, alpha: 1).cgColor
+
+        // The display, then the strips outside the visible frame, then the selection.
+        let display = NSView(frame: displayBounds)
+        display.wantsLayer = true
+        display.layer?.backgroundColor = NSColor(calibratedWhite: 0.16, alpha: 1).cgColor
+        container.addSubview(display)
+
+        for strip in [
+            CGRect(x: 0, y: visibleFrame.maxY, width: displayBounds.width,
+                   height: displayBounds.maxY - visibleFrame.maxY),
+            CGRect(x: 0, y: 0, width: displayBounds.width, height: visibleFrame.minY),
+        ] where strip.height > 0 {
+            let bar = NSView(frame: strip)
+            bar.wantsLayer = true
+            bar.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.28).cgColor
+            container.addSubview(bar)
+        }
+
+        let selection = NSView(frame: region)
+        selection.wantsLayer = true
+        selection.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.14).cgColor
+        selection.layer?.borderColor = NSColor.systemBlue.cgColor
+        selection.layer?.borderWidth = 2
+        container.addSubview(selection)
+
+        let hudBacking = NSView(frame: placement.frame)
+        hudBacking.wantsLayer = true
+        hudBacking.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.9).cgColor
+        hudBacking.layer?.cornerRadius = 12
+        hudBacking.layer?.borderColor = NSColor.systemGreen.cgColor
+        hudBacking.layer?.borderWidth = 2
+        let hud = RecordingHUD()
+        hud.populateHUD(hudBacking, onStop: {})
+        hud.update(
+            progress: RecordingProgress(frameCount: 51, elapsed: 4.2, retainedBytes: 12 * 1_048_576),
+            limits: RecordingLimits(frameRate: 12, maxDuration: 15)
+        )
+        snapshotHUDs.append(hud)
+        container.addSubview(hudBacking)
+
+        let caption = NSTextField(labelWithString:
+            "94%-tall selection · strategy: \(placement.strategy.rawValue) · red strips are outside visibleFrame")
+        caption.font = .systemFont(ofSize: 12, weight: .medium)
+        caption.textColor = .white
+        caption.frame = CGRect(x: 12, y: size.height - 24, width: size.width - 24, height: 18)
+        container.addSubview(caption)
+
+        settle(container)
+        return try bitmap(of: container)
     }
 
     /// The *real* recording HUD, populated by `RecordingHUD` itself.

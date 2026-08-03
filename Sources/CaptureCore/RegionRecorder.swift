@@ -32,6 +32,14 @@ public final class RegionRecorder {
     public var onProgress: (@MainActor (RecordingProgress) -> Void)?
     public var onAutoStop: (@MainActor (RecordingStopReason) -> Void)?
 
+    /// Called for every frame the recorder actually retains, with the normalised image and its
+    /// offset in seconds from the first frame.
+    ///
+    /// Exists so a live pre-encoder can see the same frames the PNG buffer holds without the
+    /// recorder knowing anything about WebP. **It runs on the ScreenCaptureKit delivery queue and
+    /// must return immediately** — anything slow here drops captures. Set before `start()`.
+    public var onFrameAccepted: (@Sendable (CGImage, TimeInterval) -> Void)?
+
     private let region: CaptureRegion
     private let limits: RecordingLimits
     private let showsCursor: Bool
@@ -99,6 +107,7 @@ public final class RegionRecorder {
             fallbackSourceColorSpace: region.display.displayColorSpace,
             sourceDisplayIsWideGamutOrHDR: region.display.needsColorConversionNotice
         )
+        output.onFrameAccepted = onFrameAccepted
         output.onAutoStop = { [weak self] reason in
             Task { @MainActor in self?.handleAutoStop(reason) }
         }
@@ -294,6 +303,12 @@ final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
 
     var onAutoStop: (@Sendable (RecordingStopReason) -> Void)?
 
+    /// Called for every frame that is actually retained, with the normalised image and its
+    /// offset from the first frame. Used to feed the live pre-encoder.
+    ///
+    /// Must return immediately: it runs on the ScreenCaptureKit delivery path.
+    var onFrameAccepted: (@Sendable (CGImage, TimeInterval) -> Void)?
+
     var stateSnapshot: StateSnapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -360,19 +375,30 @@ final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
         receivedAt: ContinuousClock.Instant = .now
     ) -> CommitResult {
         lock.lock()
-        defer { lock.unlock() }
-        guard !stopped else { return .rejectedAfterStop }
+        guard !stopped else {
+            lock.unlock()
+            return .rejectedAfterStop
+        }
 
         let base = baseTimestamp ?? frame.presentationSeconds
         let elapsed = max(0, frame.presentationSeconds - base)
         guard buffer.append(RecordedFrame(pngData: pngData, timestamp: elapsed)) else {
             stopped = true
+            lock.unlock()
             return .autoStop(buffer.latchedLimit ?? .frameCountLimit)
         }
 
         if baseTimestamp == nil { baseTimestamp = frame.presentationSeconds }
         if _observedColorSpace == nil { _observedColorSpace = frame.colorSpace }
         if _firstFrameInstant == nil { _firstFrameInstant = receivedAt }
+        let observer = onFrameAccepted
+        lock.unlock()
+
+        // Fired *outside* the lock and only for frames that were actually retained, so the live
+        // pre-encoder sees exactly the frames the fallback path holds — no more, no fewer. The
+        // contract is that this returns immediately; anything expensive here would stall the
+        // ScreenCaptureKit callback and drop captures.
+        observer?(frame.image, elapsed)
         return .accepted
     }
 

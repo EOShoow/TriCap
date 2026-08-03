@@ -118,6 +118,8 @@ public enum ExportService {
         vaultRoot: URL?,
         linkStyle: MarkdownLinkStyle,
         colorSpaceNotice: String? = nil,
+        preEncoded: PreEncodedAnimation? = nil,
+        strategy: AnimationEncodeStrategy = .default,
         progress: ((Double) -> Void)? = nil
     ) throws -> ExportResult {
         guard source.frameCount > 0 else { throw TriCapError.noFramesCaptured }
@@ -127,7 +129,27 @@ public enum ExportService {
             )
         }
 
-        let data = try encodeStreaming(source: source, annotations: annotations, options: options, progress: progress)
+        // The fast path is an optimisation only: it may change how long this takes and nothing
+        // else. Everything downstream — writing, re-reading, and every verification below — is
+        // identical either way, so a pre-encoded file that is somehow wrong is caught by the same
+        // checks that guard the ordinary path.
+        let decision = PreEncodeReuse.decide(
+            artifact: preEncoded,
+            source: source,
+            annotationCount: annotations.count,
+            options: options
+        )
+        let data: Data
+        if decision.isReuse, let preEncoded {
+            data = preEncoded.data
+            progress?(1)
+        } else {
+            data = try encodeStreaming(
+                source: source, annotations: annotations, options: options,
+                strategy: strategy, progress: progress
+            )
+        }
+        TriCapLog.export.info("animation export: \(decision.reason, privacy: .public)")
 
         let url = try OutputFileWriter.write(
             data, to: directory, baseName: baseName, fileExtension: OutputFormat.animatedWebP.fileExtension
@@ -210,6 +232,7 @@ public enum ExportService {
         source: AnimationFrameSource,
         annotations: [AnnotationItem],
         options: AnimatedWebPOptions,
+        strategy: AnimationEncodeStrategy,
         progress: ((Double) -> Void)?
     ) throws -> Data {
         try WebPCodec.encodeAnimationStreaming(
@@ -217,6 +240,7 @@ public enum ExportService {
             canvasSize: source.canvasSize,
             endTimestampMs: source.endTimestampMs,
             options: options,
+            strategy: strategy,
             progress: progress
         ) { index in
             let raw = try source.loadFrame(index)

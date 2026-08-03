@@ -308,6 +308,79 @@ enum CaptureSelfTest {
             check("filename collision resolves to -1", false, detail: "\(error)")
         }
 
+        // ---- Recording chrome placement ------------------------------------------------------
+        section("HUD placement")
+        // Against the real `NSScreen.visibleFrame` of every attached display, at the selection
+        // shapes that used to put the Stop button off screen. See
+        // scripts/diagnostics/hud-placement-probe.swift for the same scenarios run through the
+        // previous algorithm.
+        do {
+            var offScreen = 0
+            var checkedPlacements = 0
+            for screen in NSScreen.screens {
+                let visible = screen.visibleFrame
+                let bounds = screen.frame
+                let shapes: [(String, CGRect)] = [
+                    ("full screen", bounds),
+                    ("95% tall", bounds.insetBy(dx: 20, dy: bounds.height * 0.025)),
+                    ("90% tall, flush bottom",
+                     CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height * 0.9)),
+                    ("90% tall, flush top",
+                     CGRect(x: bounds.minX, y: bounds.maxY - bounds.height * 0.9,
+                            width: bounds.width, height: bounds.height * 0.9)),
+                    ("small, top-left",
+                     CGRect(x: bounds.minX + 4, y: bounds.maxY - 204, width: 300, height: 200)),
+                    ("small, centre",
+                     CGRect(x: bounds.midX - 200, y: bounds.midY - 150, width: 400, height: 300)),
+                ]
+                for (name, shape) in shapes {
+                    checkedPlacements += 1
+                    let hud = HUDPlacement.place(size: RecordingHUD.hudSize, over: shape, in: visible)
+                    let countdown = HUDPlacement.placeCentred(
+                        size: RecordingHUD.countdownSize, over: shape, in: visible
+                    )
+                    if !HUDPlacement.isFullyVisible(hud.frame, in: visible)
+                        || !HUDPlacement.isFullyVisible(countdown.frame, in: visible) {
+                        offScreen += 1
+                        print("    OFF-SCREEN  \(name) on \(Int(bounds.width))×\(Int(bounds.height)): "
+                              + "hud=\(hud.frame) countdown=\(countdown.frame) visible=\(visible)")
+                    }
+                }
+            }
+            check("every HUD and countdown placement is fully on its own screen",
+                  offScreen == 0,
+                  detail: "\(checkedPlacements - offScreen)/\(checkedPlacements) across \(NSScreen.screens.count) display(s)")
+        }
+
+        // The Stop button has to be reachable by a click, and one click must stop once.
+        do {
+            let hud = RecordingHUD()
+            let content = NSView(frame: NSRect(origin: .zero, size: RecordingHUD.hudSize))
+            var stops = 0
+            hud.populateHUD(content, onStop: { stops += 1 })
+
+            if let stop = hud.stopButton {
+                check("the Stop button is inside the HUD panel",
+                      content.bounds.contains(stop.frame),
+                      detail: "\(stop.frame) in \(content.bounds)")
+                let centre = CGPoint(x: stop.frame.midX, y: stop.frame.midY)
+                check("a click at the centre of Stop hits the Stop button",
+                      content.hitTest(centre) === stop,
+                      detail: String(describing: content.hitTest(centre)))
+                check("Stop is not clipped by the panel's rounded corners",
+                      stop.frame.minX >= 12 && stop.frame.maxX <= RecordingHUD.hudSize.width - 12)
+            } else {
+                check("the HUD built a Stop button", false)
+            }
+
+            hud.stopProxy.fire()
+            hud.stopProxy.fire()
+            hud.stopProxy.fire()
+            check("three clicks on Stop stop the recording exactly once",
+                  stops == 1 && hud.stopProxy.clickCount == 3,
+                  detail: "stops=\(stops), clicks=\(hud.stopProxy.clickCount)")
+        }
+
         // ---- Recording --------------------------------------------------------------------
         section("Recording (5 s target)")
         let limits = RecordingLimits(frameRate: 12, maxDuration: 15, maxLongEdgePixels: 1440)
@@ -516,6 +589,217 @@ enum CaptureSelfTest {
         let fileCountAfterExports = (try? FileManager.default.contentsOfDirectory(atPath: insideVault.path))?.count ?? 0
 
         // ---- Cancellation -----------------------------------------------------------------
+        section("Live pre-encoding")
+        // Drives the fast path against a real libwebp encoder and a real written file, and checks
+        // every route by which it is supposed to give up. The whole point of the design is that
+        // giving up is invisible: the export still happens, and the file is still correct.
+        do {
+            let canvas = CGSize(width: 240, height: 160)
+            let frameRate = 12
+            let interval = 1.0 / Double(frameRate)
+            let frameCount = 10
+            let options = AnimatedWebPOptions()
+            let preDirectory = directory.appendingPathComponent("pre-encode")
+            try? FileManager.default.createDirectory(at: preDirectory, withIntermediateDirectories: true)
+
+            var images: [CGImage] = []
+            var pngs: [Data] = []
+            for index in 0..<frameCount {
+                guard let image = ExportBenchmark.syntheticFrame(index: index, size: canvas),
+                      let png = ImageProcessing.pngData(from: image) else { continue }
+                images.append(image)
+                pngs.append(png)
+            }
+            check("built \(frameCount) distinct frames for the pre-encode checks",
+                  images.count == frameCount)
+
+            let frames = pngs.enumerated().map {
+                RecordedFrame(pngData: $1, timestamp: Double($0) * interval)
+            }
+            let builtTimeline = ClipTiming.timeline(
+                for: frames, nominalFrameInterval: interval,
+                totalDuration: Double(frameCount) * interval
+            )
+            check("built a timeline for the pre-encode checks",
+                  builtTimeline?.timestampsMs.count == frameCount,
+                  detail: "\(builtTimeline?.timestampsMs.count ?? 0) timestamps")
+            let timeline = builtTimeline!
+
+            func makeSource(frames: [RecordedFrame], timeline: FrameTimeline) -> AnimationFrameSource {
+                AnimationFrameSource(
+                    frameCount: frames.count,
+                    timestampsMs: timeline.timestampsMs,
+                    endTimestampMs: timeline.endTimestampMs,
+                    canvasSize: canvas
+                ) { index in
+                    guard let image = frames[index].decodedImage() else {
+                        throw TriCapError.encodingFailed("frame \(index)")
+                    }
+                    return image
+                }
+            }
+
+            func preEncodeAll(backlog: Int? = nil) -> PreEncodedAnimation? {
+                let encoder = LivePreEncoder(
+                    canvasSize: canvas, options: options, frameRate: frameRate, maxBacklog: backlog
+                )
+                for (index, image) in images.enumerated() {
+                    encoder.submit(image: image, captureTimestamp: Double(index) * interval)
+                }
+                return encoder.finish(endTimestampMs: timeline.endTimestampMs)
+            }
+
+            // ---- the fast path actually fires, and its output is a real, valid file ----------
+            let artifact = preEncodeAll()
+            check("pre-encoding produced an artifact", artifact != nil,
+                  detail: artifact.map { "\($0.frameCount) frames, \($0.data.count / 1024) KB" } ?? "none")
+            check("its timestamps are the ones the export timeline asks for",
+                  artifact?.timestampsMs == timeline.timestampsMs)
+
+            let source = makeSource(frames: frames, timeline: timeline)
+            check("the reuse policy accepts an untouched full-range export",
+                  PreEncodeReuse.decide(artifact: artifact, source: source,
+                                        annotationCount: 0, options: options).isReuse)
+
+            var fastResult: ExportResult?
+            var slowResult: ExportResult?
+            do {
+                fastResult = try ExportService.exportAnimation(
+                    source: makeSource(frames: frames, timeline: timeline), annotations: [],
+                    options: options, directory: preDirectory, baseName: "fast",
+                    vaultRoot: nil, linkStyle: .markdown, preEncoded: artifact
+                )
+                slowResult = try ExportService.exportAnimation(
+                    source: makeSource(frames: frames, timeline: timeline), annotations: [],
+                    options: options, directory: preDirectory, baseName: "slow",
+                    vaultRoot: nil, linkStyle: .markdown, preEncoded: nil
+                )
+            } catch {
+                check("both export paths succeeded", false, detail: "\(error)")
+            }
+
+            if let fast = fastResult, let slow = slowResult {
+                check("the fast path wrote a verified animated WebP",
+                      fast.container == .webpAnimated,
+                      detail: "\(fast.container.rawValue), \(fast.byteCount / 1024) KB")
+                // Re-read from disk rather than trusting what was returned.
+                if let fastInfo = try? WebPCodec.inspectAnimation(data: Data(contentsOf: fast.url)),
+                   let slowInfo = try? WebPCodec.inspectAnimation(data: Data(contentsOf: slow.url)) {
+                    check("the two paths agree on the canvas",
+                          fastInfo.canvasWidth == slowInfo.canvasWidth
+                              && fastInfo.canvasHeight == slowInfo.canvasHeight,
+                          detail: "\(fastInfo.canvasWidth)×\(fastInfo.canvasHeight)")
+                    check("the two paths agree on the frame count",
+                          fastInfo.frameCount == slowInfo.frameCount,
+                          detail: "fast=\(fastInfo.frameCount), slow=\(slowInfo.frameCount)")
+                    check("the two paths agree on playback length",
+                          fastInfo.totalDurationMs == slowInfo.totalDurationMs,
+                          detail: "\(fastInfo.totalDurationMs) ms")
+                    check("the two paths agree on every frame timestamp",
+                          fastInfo.frameTimestampsMs == slowInfo.frameTimestampsMs)
+                    check("the two paths agree on the loop count",
+                          fastInfo.loopCount == slowInfo.loopCount)
+                }
+            }
+
+            // ---- every fallback route -------------------------------------------------------
+            let trimmedFrames = Array(frames.dropFirst().dropLast())
+            if let trimmedTimeline = ClipTiming.timeline(
+                for: trimmedFrames, nominalFrameInterval: interval,
+                totalDuration: Double(trimmedFrames.count) * interval
+            ) {
+                let trimmedSource = makeSource(frames: trimmedFrames, timeline: trimmedTimeline)
+                let decision = PreEncodeReuse.decide(
+                    artifact: artifact, source: trimmedSource, annotationCount: 0, options: options
+                )
+                check("a trimmed range falls back", !decision.isReuse, detail: decision.reason)
+
+                // And the fallback still produces a correct file.
+                if let trimmedResult = try? ExportService.exportAnimation(
+                    source: makeSource(frames: trimmedFrames, timeline: trimmedTimeline),
+                    annotations: [], options: options, directory: preDirectory,
+                    baseName: "trimmed", vaultRoot: nil, linkStyle: .markdown, preEncoded: artifact
+                ) {
+                    check("the trimmed export is still a valid animation of the trimmed length",
+                          trimmedResult.animationInfo?.totalDurationMs == trimmedTimeline.endTimestampMs,
+                          detail: "\(trimmedResult.animationInfo?.totalDurationMs ?? -1) ms")
+                } else {
+                    check("the trimmed export succeeded", false)
+                }
+            }
+
+            let annotated = PreEncodeReuse.decide(
+                artifact: artifact, source: makeSource(frames: frames, timeline: timeline),
+                annotationCount: 1, options: options
+            )
+            check("an annotation falls back", !annotated.isReuse, detail: annotated.reason)
+
+            let requeried = PreEncodeReuse.decide(
+                artifact: artifact, source: makeSource(frames: frames, timeline: timeline),
+                annotationCount: 0, options: AnimatedWebPOptions(quality: 55)
+            )
+            check("a changed quality falls back", !requeried.isReuse, detail: requeried.reason)
+
+            let noArtifact = PreEncodeReuse.decide(
+                artifact: nil, source: makeSource(frames: frames, timeline: timeline),
+                annotationCount: 0, options: options
+            )
+            check("no artifact falls back", !noArtifact.isReuse, detail: noArtifact.reason)
+
+            // ---- forced backlog --------------------------------------------------------------
+            let starved = LivePreEncoder(
+                canvasSize: canvas, options: options, frameRate: frameRate, maxBacklog: 1
+            )
+            for round in 0..<40 {
+                for (index, image) in images.enumerated() {
+                    starved.submit(image: image, captureTimestamp: Double(round * frameCount + index) * 0.001)
+                }
+            }
+            check("a starved pre-encoder abandons instead of queueing without limit",
+                  starved.finish(endTimestampMs: 99_000) == nil,
+                  detail: starved.abandonedBecause?.reason ?? "did not abandon")
+            check("the abandoned pre-encoder holds no pending frames", starved.pendingFrames == 0)
+
+            // ---- cancellation ----------------------------------------------------------------
+            let cancelled = LivePreEncoder(canvasSize: canvas, options: options, frameRate: frameRate)
+            for (index, image) in images.enumerated() {
+                cancelled.submit(image: image, captureTimestamp: Double(index) * interval)
+            }
+            cancelled.cancel()
+            cancelled.cancel()
+            check("a cancelled pre-encoder releases its encoder and yields nothing",
+                  cancelled.finish(endTimestampMs: timeline.endTimestampMs) == nil
+                      && cancelled.abandonedBecause == .cancelled)
+            check("a cancelled pre-encoder ignores further frames",
+                  { cancelled.submit(image: images[0], captureTimestamp: 99); return !cancelled.isActive }())
+
+            // ---- what it is worth -------------------------------------------------------------
+            let slowStart = ContinuousClock.now
+            _ = try? ExportService.exportAnimation(
+                source: makeSource(frames: frames, timeline: timeline), annotations: [],
+                options: options, directory: preDirectory, baseName: "timed-slow",
+                vaultRoot: nil, linkStyle: .markdown, preEncoded: nil
+            )
+            let slowSeconds = ExportBenchmark.elapsed(since: slowStart)
+
+            let warmArtifact = preEncodeAll()
+            let fastStart = ContinuousClock.now
+            _ = try? ExportService.exportAnimation(
+                source: makeSource(frames: frames, timeline: timeline), annotations: [],
+                options: options, directory: preDirectory, baseName: "timed-fast",
+                vaultRoot: nil, linkStyle: .markdown, preEncoded: warmArtifact
+            )
+            let fastSeconds = ExportBenchmark.elapsed(since: fastStart)
+            print(String(format: "  export tail at %d×%d, %d frames: %.3f s → %.3f s (%.0f%% faster)",
+                         Int(canvas.width), Int(canvas.height), frameCount,
+                         slowSeconds, fastSeconds,
+                         slowSeconds > 0 ? (slowSeconds - fastSeconds) / slowSeconds * 100 : 0))
+            print("  (full 1440×900 / 181-frame numbers: TriCap --benchmark-export, see REVIEW_HANDOFF.md)")
+            check("reusing the pre-encoded animation is faster than re-encoding",
+                  fastSeconds < slowSeconds,
+                  detail: String(format: "%.3f s vs %.3f s", fastSeconds, slowSeconds))
+        }
+
         section("Cancel an in-flight recording")
         let cancellable = RegionRecorder(region: region, limits: limits)
         do {

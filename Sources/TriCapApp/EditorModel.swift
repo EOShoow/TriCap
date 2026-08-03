@@ -56,14 +56,23 @@ public final class EditorModel: ObservableObject {
     private let onExported: (ExportResult) -> Void
     private let onClosed: () -> Void
 
+    /// The animation encoded while the recording was running, if there is one.
+    ///
+    /// Only used when the export asks for exactly what it contains — full frame range, no
+    /// annotations, unchanged parameters. `PreEncodeReuse` makes that decision; everything else
+    /// goes through the ordinary per-frame render and encode.
+    private let preEncoded: PreEncodedAnimation?
+
     public init(
         source: EditorSource,
         settings: AppSettings,
+        preEncoded: PreEncodedAnimation? = nil,
         onExported: @escaping (ExportResult) -> Void,
         onClosed: @escaping () -> Void
     ) {
         self.source = source
         self.settings = settings
+        self.preEncoded = preEncoded
         self.onExported = onExported
         self.onClosed = onClosed
         self.style = AnnotationStyle()
@@ -248,6 +257,7 @@ public final class EditorModel: ObservableObject {
             let canvasSize = self.canvasSize
             let options = settings.animatedWebPOptions
             let notice = colorSpaceNotice
+            let artifact = self.preEncoded
 
             let source = AnimationFrameSource(
                 frameCount: trimmed.count,
@@ -272,6 +282,7 @@ public final class EditorModel: ObservableObject {
                         vaultRoot: settings.markdownVaultRootURL,
                         linkStyle: settings.markdownLinkStyle,
                         colorSpaceNotice: notice,
+                        preEncoded: artifact,
                         progress: { value in
                             Task { @MainActor in self.exportProgress = value }
                         }

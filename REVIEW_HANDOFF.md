@@ -6,6 +6,12 @@ The working tree is left exactly as verified below.
 **Environment:** macOS 26.5.2 (25F84), Apple silicon, Swift 6.3.3, Command Line Tools 26.5,
 **no `Xcode.app` installed**. One display attached (1920×1080 pt @ 2.0 → 3840×2160 px).
 
+> **Round 7.** Baseline `79d20b3`. The recording HUD could land off screen on near-full-screen
+> selections, and animated-WebP export was far slower than it needed to be. Both were reproduced
+> with evidence before anything changed. See [§0.000](#0000-round-7--hud-placement-and-export-performance).
+> Headline: **export tail latency 177.0 s → 0.85 s** on a 15-second 1440×900 high-motion clip,
+> with no measurable cost during recording.
+>
 > **Round 6.** Baseline `45e5cf5`. Four fixes from Codex's source review and window-server probe:
 > Escape priority, pin ordering, system-layer windows in hover/snap, and the lost copy
 > confirmation on P3/HDR displays. See [§0.00](#000-round-6--codex-acceptance-fixes). Two of the
@@ -26,6 +32,156 @@ The working tree is left exactly as verified below.
 > [§4.6](#46-round-2-specific-gaps) for what round 2 could *not* verify on this machine.
 
 ---
+
+## 0.000 Round 7 — HUD placement and export performance
+
+Two independent problems. Both were reproduced with a runnable probe first, and in the second case
+the probe overturned the assumption the task started from — worth reading before the code.
+
+### A. The recording HUD could land off screen
+
+`scripts/diagnostics/hud-placement-probe.swift` transcribes the old
+`makeFloatingWindow(size:belowTopOf:)` verbatim and runs it over realistic selections. On this
+machine's real displays:
+
+```
+  live screen 1 1470×956 · full screen
+    visibleFrame  (0, 43  1470×880)
+    HUD           (585, 968  300×74)   ✗ 119 pt above the top
+  live screen 1 1470×956 · 90% height, flush to bottom
+    HUD           (585, 872  300×74)   ✗ 23 pt above the top
+  live screen 1 1470×956 · 90% height, flush to top
+    HUD           (585, 10   300×74)   ✗ 33 pt below the bottom
+  live screen 2 1280×800 · full screen
+    HUD           (-790, 968 300×74)   ✗ 86 pt above the top
+
+  8/12 HUD placements land outside the visible frame
+  1/12 countdown placements land outside the visible frame
+```
+
+Three separate defects: the "no room below" fallback moved the HUD *above* without checking that
+it fit; no branch constrained y at all; and the x clamp used full display bounds rather than the
+visible frame, so a HUD could also sit under the Dock. The countdown was centred with no clamping
+whatsoever.
+
+`HUDPlacement` replaces it: outside-below → outside-above → inside-bottom → inside-top, everything
+clamped into the *matching* screen's `visibleFrame` (resolved by `CGDirectDisplayID`, never
+defaulting to main). Placing the HUD inside the selection is safe — the chrome is
+`sharingType = .none` and TriCap is excluded from the capture filter, so it is never recorded.
+
+**The tests fail against the old algorithm.** Substituting it back produces:
+
+```
+✘ A full-screen selection still gets a visible HUD                     (585, 968) outside (0, 43, 1470, 880)
+✘ A tall selection flush with the bottom of the display                (585, 872.4) outside
+✘ A tall selection flush with the top of the display                   (585, 968) outside
+✘ A full-screen selection on a negative-coordinate display …           (-790, 968) outside
+✘ A zero-size region does not produce NaN                              (8, 12) outside
+✘ Every selection on every display shape keeps the HUD on screen        140 issues
+```
+
+Runtime evidence in `--selftest`, against every attached display:
+
+```
+== HUD placement
+  PASS  every HUD and countdown placement is fully on its own screen  — 12/12 across 2 display(s)
+  PASS  a click at the centre of Stop hits the Stop button
+  PASS  three clicks on Stop stop the recording exactly once  — stops=1, clicks=3
+```
+
+Snapshot `15-hud-placement-near-fullscreen.png` draws the whole relationship at 1:1 — display,
+visible frame, a 94%-tall selection, and the resulting placement (`strategy: insideTop`).
+
+### B. Export was slow for a reason nobody had measured
+
+The task assumed the fix was to move encoding into the recording. Measuring first showed that was
+the *second* problem, and would not have worked on its own.
+
+`TriCap --benchmark-export` profiles per-frame cost. At 1440×900:
+
+```
+    PNG decode            0.1 ms/frame
+    RGBX extraction       8.7 ms/frame
+    WebPAnimEncoderAdd  857.2 ms/frame   <- dominates
+    assemble              0.2 ms total
+    capture interval     83.3 ms/frame at 12 fps
+    encode is 10.3× the capture interval — pre-encoding CANNOT keep up
+```
+
+Encoding was **ten times slower than real time**, so a live pre-encoder would have filled its
+backlog in about a second and abandoned on every recording. The cost was two
+`WebPAnimEncoderOptions` flags — neither a user setting — that TriCap had been setting since the
+first commit: `minimize_size` (retry frames hunting for a smaller result) and `allow_mixed`
+(encode **every frame both lossily and losslessly**, keep the smaller). Turning both off:
+
+| strategy | `WebPAnimEncoderAdd` | file size |
+|---|---|---|
+| `.thorough` (shipped through `79d20b3`) | 873.7 ms/frame | 1304 KB |
+| `.balanced` (new default) | **45.6 ms/frame** | 1336 KB (+2.5%) |
+
+19× faster for 2.5% larger files — and now under the 83 ms capture interval, which is what makes
+pre-encoding viable at all. The user's quality, method, lossless and loop settings are untouched;
+`AnimationEncodeStrategy.thorough` still exists so the trade is reversible and measurable.
+
+### The performance measurement, and how to repeat it
+
+```bash
+caffeinate -dimsu .build/release/TriCap --benchmark-export /tmp/bench \
+  --frames 181 --runs 3 --width 1440 --height 900
+```
+
+- **Material**: synthesised, not screen-captured, and the report says so. A real screen recording
+  is not reproducible here (the display can stop compositing, and content differs run to run),
+  while what governs encoder cost is frame entropy — which a generator can hold constant. Every
+  frame differs from its predecessor across the whole canvas, so libwebp's frame coalescing is
+  fully defeated. That is the **worst** case, and the one real video-like content approaches.
+- **Pacing**: the simulated recording delivers frames at the true 83.3 ms interval. An earlier
+  version submitted them as fast as it could build them, which left the pre-encoder no wall-clock
+  slack and made the fast path measure as a 3.9% *loss*. Without pacing the number is meaningless.
+- **Three arms**, so the two changes are separable.
+- **Median of three runs.**
+
+1440×900, 181 frames (15 s at 12 fps):
+
+| arm | tail latency (median) | all runs | vs A | size |
+|---|---|---|---|---|
+| A  `.thorough`, no pre-encode — the `79d20b3` baseline | **177.0 s** | 163.1, 177.0, 238.6 s | — | 9672 KB |
+| B  `.balanced`, no pre-encode | **11.3 s** | 11.3, 11.8, 10.1 s | 93.6% faster | 9929 KB (+2.7%) |
+| C  `.balanced` + live pre-encode | **0.85 s** | 0.80, 0.85, 1.23 s | **99.5% faster** | 9929 KB (+2.7%) |
+
+**In-recording cost, measured separately** as how late each frame was against its delivery slot —
+a frame later than one interval is one a real recorder would have dropped:
+
+| arm | worst lateness | frames later than one interval |
+|---|---|---|
+| A | 0.2 ms | 0 |
+| B | 0.2 ms | 0 |
+| C | 0.2 ms | 0 |
+
+Pre-encoding adds no measurable cost to recording: `submit` does no encoding on the capture path,
+and at 45.6 ms per frame the encoder finishes well inside each 83 ms interval.
+
+The target was a ≥50% reduction. The measured reduction is 99.5%, and the two contributions are
+reported separately because they are independent: the strategy change alone is 93.6%, and it is
+what made the pre-encoder possible rather than merely additive.
+
+### How the fast path stays safe
+
+It is an optimisation that may change only *how long the user waits*:
+
+- `PreEncodeReuse` is a pure function that defaults to **no**. It requires the full untrimmed range
+  (same frame count *and* the same timestamps), no annotations, the same canvas, all four encoder
+  parameters unchanged, and the same end timestamp.
+- Whichever route runs, the file goes through the same write, re-read and verification.
+- The PNG frames are untouched throughout, so nothing recorded can be lost by this path.
+- `IncrementalTimeline` is the one rule both the live and export timelines run, because a
+  one-millisecond divergence would make the pre-encoded file silently wrong for the timeline it
+  claims. Pinned by a test that compares the two over steady, sub-millisecond, stalled, single-frame
+  and identical-timestamp sequences.
+
+`--selftest` §Live pre-encoding drives all of it against real libwebp and real written files —
+fast-path hit, output equality between both routes, every fallback, a forced backlog, cancellation,
+and a timing diagnostic (21 checks).
 
 ## 0.00 Round 6 — Codex acceptance fixes
 
@@ -546,7 +702,7 @@ all public — plus the in-repo modules and `CWebP`.
 .build/release/TriCap --render-ui-snapshots ./build/ui-snapshots
 ```
 
-Fourteen PNGs in `build/ui-snapshots/`, all inspected individually:
+Fifteen PNGs in `build/ui-snapshots/`, all inspected individually:
 
 | File | Shows |
 |---|---|
@@ -563,6 +719,7 @@ Fourteen PNGs in `build/ui-snapshots/`, all inspected individually:
 | `11-selection-overlay-screenshot.png` | **Round 3.** Screenshot mode: blue banner "● Take a screenshot · Click a window or drag · R record · Esc cancel", corner brackets, "Release to capture" |
 | `12-recording-countdown.png` | Countdown, now drawn by `RecordingHUD.populateCountdown` itself: `3`, "Recording starts…", "Esc to cancel" — and Escape now genuinely works from other apps |
 | `13-export-toast-warning.png` | **Round 4.** The same toast carrying a wrapping warning, proving the panel grows instead of clipping |
+| `15-hud-placement-near-fullscreen.png` | **Round 7, new.** A 94%-tall selection drawn 1:1 against its display: red strips are outside the visible frame (menu bar and Dock), blue is the selection, and the real HUD sits where `HUDPlacement` put it (`strategy: insideTop`) — clear of both strips. The case that used to land 119 pt off the top |
 | `14-selection-window-highlight.png` | **Round 5, new.** The pre-drag state: a window under the pointer outlined and tinted, with a `1120 × 640 px · click to capture` badge — the real `SelectionOverlayView.drawWindowHighlight` |
 
 **These are offscreen renders of the real view hierarchies** (`NSHostingView` / `SelectionOverlayView`
@@ -712,6 +869,18 @@ from the documented behaviour of those filesystems, not from observation here.
 reports case-*insensitive*. The comparison rule is tested directly as a pure function over path
 components, and `volumeCaseSensitivity(for:)` is tested to agree with whatever this volume reports.
 A case-sensitive APFS volume would exercise the other branch end to end.
+
+### 4.10 Round-7-specific gaps
+
+| Change | Not verified | How to check by hand |
+|---|---|---|
+| HUD placement | That the Stop button is *clickable* on a real near-full-screen recording. The placement is asserted against real `NSScreen.visibleFrame` for both displays, and the button is hit-tested in the view hierarchy — but nobody moved a mouse to it. | Record a full-screen region and click Stop |
+| Stop-once | Asserted by firing `HUDStopProxy` three times, which is the action a click sends — not by double-clicking a real button. | Start a recording, double-click Stop fast |
+| Export performance | **The material is synthetic.** No number here comes from a real screen recording. The generator produces worst-case entropy (every frame fully different), so real content should do no worse — but "no worse" is an argument, not a measurement. Arm A run 3 was 238.6 s against a 163.1 s minimum, so there is real variance in the slow arm; the median is reported. | Record 15 s of video playback and time the export before/after |
+| In-recording cost | Measured as lateness in a *simulated* recording loop, not as ScreenCaptureKit frame drops. The real recorder also PNG-encodes on that path, which the simulation reproduces, but SCK's own queueing behaviour is not modelled. | Record high-motion content and compare `droppedFrameCount` |
+| `.balanced` size trade | +2.7% on this synthetic material at quality 80. Different content and quality settings will differ, and only this one point was measured. | `--benchmark-export` at other qualities |
+| Pre-encoding under memory pressure | The backlog ceiling is tested by forcing it, but not by running a real recording on a machine that is genuinely starved. | — |
+| Live pre-encoding end to end | The pre-encoder is wired into `recordClip` and the artifact threaded to the editor, but **no real recording was made through the app in this session** — the selftest drives `LivePreEncoder` and `ExportService` directly. Whether `RegionRecorder.onFrameAccepted` fires as expected under real ScreenCaptureKit delivery is unverified. | Record a clip, export without trimming, confirm it is fast; then trim and confirm it is still correct |
 
 ### 4.9 Round-5-specific gaps
 
@@ -915,6 +1084,10 @@ caffeinate -dimsu .build/release/TriCap --selftest ./build/selftest
 # 6. UI snapshots
 .build/release/TriCap --render-ui-snapshots ./build/ui-snapshots
 
+# 6b. export performance (slow: arm A alone is ~3 minutes per run)
+caffeinate -dimsu .build/release/TriCap --benchmark-export ./build/benchmark \
+  --frames 181 --runs 3 --width 1440 --height 900
+
 # 7. re-vendor libwebp from upstream (verifies the pinned SHA-256)
 ./scripts/vendor-libwebp.sh 1.6.0   # should produce no diff
 
@@ -923,6 +1096,13 @@ open build/release/TriCap.app
 ```
 
 Steps 5 and 6 need Screen & System Audio Recording permission for the binary being run.
+
+To reproduce the HUD placement finding from §0.000 against the previous algorithm, with no TriCap
+code involved:
+
+```bash
+swift scripts/diagnostics/hud-placement-probe.swift
+```
 
 To reproduce the "AppKit outlives `close()`" finding from §0.0 independently of TriCap — a plain
 `NSPanel`, a plain `NSView`, no TriCap types anywhere in the file:

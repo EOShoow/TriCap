@@ -155,8 +155,17 @@ struct EditorView: View {
                     model.trimEnd = model.frameCount - 1
                     model.clampPreviewToTrim()
                 }
-                .disabled(model.trimStart == 0 && model.trimEnd == model.frameCount - 1)
+                .disabled(!model.isTrimmable || (model.trimStart == 0 && model.trimEnd == model.frameCount - 1))
             }
+
+            // A one-frame clip has nothing to trim and nothing to scrub. Showing sliders whose
+            // range had to be padded to 0...1 would let the user select a frame index that does
+            // not exist.
+            if !model.isTrimmable {
+                Text("Single frame — nothing to trim.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
 
             HStack(spacing: 10) {
                 Text("Start").font(.caption).foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
@@ -168,7 +177,7 @@ struct EditorView: View {
                             model.previewIndex = model.trimStart
                         }
                     ),
-                    in: 0...Double(max(1, model.frameCount - 1))
+                    in: model.trimHandleRange
                 )
                 Text("\(model.trimStart)").font(.caption.monospacedDigit()).frame(width: 34)
             }
@@ -183,7 +192,7 @@ struct EditorView: View {
                             model.previewIndex = model.trimEnd
                         }
                     ),
-                    in: 0...Double(max(1, model.frameCount - 1))
+                    in: model.trimHandleRange
                 )
                 Text("\(model.trimEnd)").font(.caption.monospacedDigit()).frame(width: 34)
             }
@@ -195,9 +204,10 @@ struct EditorView: View {
                         get: { Double(model.previewIndex) },
                         set: { model.previewIndex = Int($0.rounded()).clamped(to: model.trimStart...model.trimEnd) }
                     ),
-                    in: Double(model.trimStart)...Double(max(model.trimStart + 1, model.trimEnd))
+                    in: model.previewScrubRange
                 )
                 Text("\(model.previewIndex)").font(.caption.monospacedDigit()).frame(width: 34)
+            }
             }
         }
         .padding(.horizontal, 14)

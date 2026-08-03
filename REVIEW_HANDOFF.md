@@ -6,6 +6,34 @@ The working tree is left exactly as verified below.
 **Environment:** macOS 26.5.2 (25F84), Apple silicon, Swift 6.3.3, Command Line Tools 26.5,
 **no `Xcode.app` installed**. One display attached (1920×1080 pt @ 2.0 → 3840×2160 px).
 
+> **Round 2.** Baseline `83a8c12`. All ten review items are fixed; see
+> [§0](#0-review-round-2--what-changed) for the issue → file → test mapping and
+> [§4.6](#46-round-2-specific-gaps) for what round 2 could *not* verify on this machine.
+
+---
+
+## 0. Review round 2 — what changed
+
+Every item was reproduced in the code before being changed; none was taken on trust.
+
+| # | Issue (as raised) | Root cause confirmed | Fix | Tests |
+|---|---|---|---|---|
+| A1 | Recording mutual exclusion released too early | `beginCapture`'s `defer` set `isCapturing = false` as soon as `recordClip` returned, which was right after `hud.showRecordingHUD` — a second trigger then overwrote `self.recorder`, the shared `StopProxy.shared.handler`, the HUD windows and the Esc monitor | `RecordingSession` (awaits full teardown before returning) + `CaptureSessionGate` (single occupancy for the whole pipeline); `HUDStopProxy` is now per-HUD instead of a singleton | `RecordingSessionTests` (10), `CaptureSessionGateTests` (5) |
+| A2 | Static screen never hit the duration ceiling | `FrameConverter` drops non-`.complete` frames, and the `elapsed > maxDuration` check lived inside `stream(_:didOutputSampleBuffer:)`, so with no new frames it never ran | 10 Hz `ContinuousClock` tick in `RegionRecorder` (latched once, invalidates its own timer); `RecordedClip.wallClockDuration`; `ClipTrimmer.trimmedDuration`; `ClipTiming.timeline(totalDuration:)` | `TrimmedDurationTests` (8), `RecordedClipDurationTests` (4), `ClipTimingTests` (10) + selftest §static-screen |
+| A3 | Colour space lost | `finish()` called `teardown()` (which sets `output = nil`) *before* reading `output?.observedColorSpace`, so it was **always** `nil` for recordings | `captureOutputState()` snapshots colour space and first-frame instant before teardown; `RecordedClip.colorSpaceNotice` makes the editor-visible string testable | `ColorSpacePropagationTests` (5) + selftest assertion |
+| A4 | Editor retain cycle | `onClosed: { window?.close() }` captured the local `var window` box strongly: `window → contentViewController → EditorView → model → closure → box → window` | `EditorPresenter` with a `WindowBox` holding the window **weakly**; `release(_:)` drops the content view controller | selftest §editor window lifecycle asserts `weak` model and window are both `nil` after close |
+| A5 | Recording Esc was local-only | `NSEvent.addLocalMonitorForEvents` only sees keys delivered to TriCap | Carbon `RegisterEventHotKey` with a **bare** Escape in a dedicated slot, claimed only while recording. Verified it needs no Accessibility (see §3.7) | selftest §recording-cancel hot key (8 checks) |
+| B6 | Failed re-registration left no shortcut | `register()` unregisters first; a rejected new combo left both slots empty | `HotKeyRegistrationPolicy.apply` rolls back to the previous combo and the app reverts the stored setting | `HotKeyRegistrationPolicyTests` (6) |
+| B7 | Unconditional case-insensitive containment | `compare(_:options: .caseInsensitive)` regardless of volume | `MarkdownReference.CaseSensitivity`, read from `URLResourceKey.volumeSupportsCaseSensitiveNamesKey`, plus a pure component comparison so the case-sensitive branch is testable without such a volume | `MarkdownCaseSensitivityTests` (6) |
+| B8 | `link(2)` failure aborted the write | exFAT/FAT return `EPERM`, many SMB mounts `ENOTSUP`; the old code threw on anything but `EEXIST` | Three claim strategies tried in order: `link(2)` → `renamex_np(RENAME_EXCL)` → `open(O_CREAT\|O_EXCL)`, with those errnos falling through | `FileClaimStrategyTests` (11, parameterised over all three strategies) |
+| B9 | HUD Stop button contrast | Default (light) appearance rendered a dark bezel + dark label on the dark HUD | `content.appearance = .darkAqua` + white content tint | snapshot `05-recording-hud.png` regenerated |
+| B10 | One-frame clip exposed index 1 | Slider ranges were padded with `max(1, frameCount - 1)` and `max(trimStart + 1, trimEnd)` | `ClipTrimUI` returns `nil` when there is nothing to trim; the editor hides the sliders and says "Single frame — nothing to trim." | `ClipTrimUITests` (4) + snapshot `07-editor-single-frame-clip.png` |
+
+**A defect found by the new tests during this round.** The first version of the A2 fix re-fired the
+duration ceiling on every 10 Hz tick (21 callbacks in one run) because `handleAutoStop` only
+guarded on `state == .running`, which stays `.running` until `finish()`. The selftest's "it fired
+exactly once" check caught it; `handleAutoStop` now latches and invalidates its own timer.
+
 ---
 
 ## 1. Implementation scope
@@ -66,8 +94,8 @@ swift build -c release
 ```
 
 ```
-Debug   → Build complete! (36.59s)   [180 tasks]
-Release → Build complete! (38.70s)   [140 tasks]
+Debug   → Build complete! (36.83s)
+Release → Build complete! (36.00s)
 ```
 
 Zero warnings, zero errors (`swift build 2>&1 | grep -c "warning:"` → `0`).
@@ -81,14 +109,18 @@ Zero warnings, zero errors (`swift build 2>&1 | grep -c "warning:"` → `0`).
 ```
 
 ```
-✔ Test run with 134 tests in 17 suites passed after 0.174 seconds.
+✔ Test run with 190 tests in 26 suites passed after 0.495 seconds.
 ```
 
 Suites: Coordinate conversion · Output sizing · CaptureRegion resolution · Clip trimming ·
-Animated WebP timeline · Frame buffer limits · Annotation document · Annotation rendering ·
-Markdown reference · Output file writing · libwebp bridge · Animated WebP frame coalescing ·
-Magic byte detection · Export service (stills / animated WebP / degenerate recordings) ·
-Screen recording permission state.
+**Trimmed duration semantics** · **Recorded clip duration** · Animated WebP timeline ·
+Frame buffer limits · **Recording session lifecycle** · **Capture session gate** ·
+Annotation document · Annotation rendering · Markdown reference ·
+**Markdown containment case sensitivity** · Output file writing · **Output file claim strategies** ·
+libwebp bridge · Animated WebP frame coalescing · Magic byte detection ·
+Export service (stills / animated WebP / degenerate recordings) · Screen recording permission
+state · **Colour space propagation** · **Clip trim slider ranges** ·
+**Hot key registration roll-back**. (Bold = added in round 2.)
 
 Required coverage, mapped:
 
@@ -107,7 +139,7 @@ Required coverage, mapped:
 .build/debug/TriCap --selftest ./build/selftest
 ```
 
-Abridged output from the last run (Release build gave identical results):
+Run with `caffeinate -dimsu` — see §4.6 for why. Abridged output from the last Release run:
 
 ```
 TriCap self-test
@@ -115,8 +147,7 @@ TriCap self-test
 
 == Screen recording permission
   CGPreflightScreenCaptureAccess() = true
-  ScreenRecordingPermission.authorizationStatus() = authorized
-  PASS  SCShareableContent reachable  — 1 display(s), 12 app(s)
+  PASS  SCShareableContent reachable  — 1 display(s), 13 app(s)
 
 == Displays
   display 2: appKit=(0,0 1920x1080) quartz=(0,0 1920x1080) scale=2.0 pixels=3840x2160
@@ -128,52 +159,79 @@ TriCap self-test
   PASS  1-pixel top-left corner selection  — (0,0 1x1)
 
 == Still capture
-  PASS  SCScreenshotManager capture  — 800x600, source colour space kCGColorSpaceSRGB, converted=false
+  PASS  SCScreenshotManager capture  — 800x600, source colour space kCGColorSpaceSRGB
   PASS  capture matches the requested pixel rect
   PASS  capture is sRGB  — kCGColorSpaceSRGB
 
 == Annotate and export stills
-  PASS  annotation document has 4 items and can undo
-  PASS  export PNG   — still-png.png  63537 bytes container=png
-  PASS  export JPEG  — still-jpeg.jpg 65795 bytes container=jpeg
-  PASS  export WebP  — still-webp.webp 22058 bytes container=webpStill
-  PASS  <each> extension matches magic bytes
-  PASS  <each> reference is vault-relative  — ![still-png](assets/still-png.png) …
-  PASS  WebP decodes back at the same size  — 800x600
+  PASS  export PNG / JPEG / WebP, magic bytes match the extension, references are vault-relative
   PASS  outside-vault reference is the absolute path
   PASS  filename collision resolves to -1  — collision.png, collision-1.png
 
 == Recording (5 s target)
-  output pixel size: 800x600
-  PASS  recording finishes with frames — 60 frames, 5.05 s, 3334 KB retained,
-                                        stop=userStopped, dropped=0
-  PASS  retained memory stayed under the ceiling
-  PASS  frame count stayed under the ceiling
+  NOTE: the screen is not compositing live (two stills either side of a
+        deliberate on-screen change are byte-identical). Multi-frame
+        expectations are skipped; everything else still runs.
+  PASS  recording finishes with at least one frame  — 1 frames, 6.18 s, 600 KB, stop=userStopped
+  SKIP  recording captured the on-screen motion as multiple frames  — not verified in this run:
+        the display is not compositing live
+  PASS  colour-space outcome survived teardown  — kCGColorSpaceSRGB converted=false wide=false   <- A3
+  PASS  measured wall clock is consistent with the frame span  — wall 6.18 s, duration 6.18 s
+  PASS  retained memory / frame count stayed under the ceiling
   PASS  frame timestamps are non-decreasing
 
 == Trim and export animated WebP
-  PASS  trim keeps the expected frame count — kept 56 of 60 (indices 2...57)
-  PASS  trimmed clip restarts at t=0
+  PASS  trim keeps the expected frame count · trimmed clip restarts at t=0
+  PASS  trimmed span is positive and no longer than the clip
   PASS  timeline is strictly increasing and starts at 0
-  PASS  animated WebP written — clip.webp 57994 bytes
-  PASS  container is animated WebP
-  PASS  stored frame count is within the submitted count — 52 stored of 56 submitted
-  PASS  total playback duration is preserved — 4716 ms vs 4716 ms
-  PASS  canvas size round-trips — 800x600
-  PASS  loop count is 0 (infinite)
-  PASS  timestamps read back strictly increasing
-  PASS  every frame duration > 0
-  PASS  markdown reference is vault-relative — ![clip](assets/clip.webp)
-  PASS  fixed overlay present on every frame — sampled (40,20) in all 52 frames
+  PASS  animated WebP written · container matches what libwebp produced
+  PASS  canvas size round-trips  — 800x600
+  PASS  markdown reference is vault-relative  — ![clip](assets/clip.webp)
+  PASS  fixed overlay present on every frame
 
 == Cancel an in-flight recording
   PASS  cancel completes and releases every retained frame
-  PASS  finish after cancel yields no clip — noFramesCaptured
-  PASS  cancelling wrote no file — 6 files in assets/, unchanged from 6
+  PASS  finish after cancel yields no clip  — noFramesCaptured
+  PASS  cancelling wrote no file  — 6 files in assets/, unchanged from 6
+
+== Static-screen recording (duration ceiling)                                                   <- A2
+  PASS  duration ceiling fired without any new frames  — durationLimit
+  PASS  it fired exactly once  — 1 auto-stop callback(s)
+  PASS  it fired at the ceiling, not when the next frame happened to arrive  — waited 5.1 s for a 3 s ceiling
+  PASS  the ceiling fired although no frame ever passed it  — last frame at 0.00 s, ceiling 3 s
+        — a frame-driven check could not have fired
+  PASS  static clip reports the real recorded length, not the frame span
+        — 1 frame(s), frame span 0.00 s, reported duration 2.98 s
+  PASS  static clip stop reason is the duration limit  — durationLimit
+  PASS  exported timeline covers the whole recording  — 2983 ms across 1 frame(s)
+  PASS  static recording exports successfully  — static.webp container=webpStill collapsed=true
+
+== Recording-cancel hot key                                                                     <- A5
+  AXIsProcessTrusted() = false  (Accessibility is never requested)
+  PASS  primary capture shortcut registers  — ⌥⇧5
+  PASS  a bare Escape can be claimed system-wide without Accessibility
+  PASS  claiming Escape leaves the capture shortcut registered  — ⌥⇧5
+  PASS  the two slots hold different combinations
+  PASS  releasing Escape does not release the capture shortcut
+  PASS  Escape can be re-claimed for the next recording
+  PASS  a modifier-less combination is refused for the configurable shortcut
+  PASS  all hot keys released at the end of the run
+
+== Editor window lifecycle                                                                      <- A4
+  PASS  editor window created · presenter owns exactly one window
+  PASS  presenter released the window
+  PASS  EditorModel deallocated after close
+  PASS  editor NSWindow deallocated after close
 
 == Summary
-  ALL CHECKS PASSED
+  ALL EXECUTED CHECKS PASSED — 1 SKIPPED (see SKIP lines above)
 ```
+
+The single SKIP is the multi-frame expectation; see §4.6. The static-screen section is the
+strongest evidence for A2: **one** frame, frame span `0.00 s`, and the recording still stopped
+itself at the 3 s ceiling and reported a 2.98 s duration. The pre-fix code could only fire that
+ceiling when a frame arrived past it, which by definition requires the frame span to exceed the
+ceiling.
 
 `file(1)` on the artefacts (independent confirmation of extension ↔ container ↔ dimensions):
 
@@ -265,8 +323,9 @@ Six PNGs in `build/ui-snapshots/`, all inspected:
 | `02-editor-still.png` | Still editor: 5-tool picker, 6-colour palette, stroke slider, undo/redo/clear, canvas with arrow + rectangle + text + mosaic composited, `940 × 620 px`, Format picker (PNG), Close/Save |
 | `03-editor-clip-trim.png` | Clip editor: mosaic tool selected with its block-size slider, `8 of 12 frames · 0.7 s`, Reset trim, Start=2 / End=9 / Frame=5 sliders, `640 × 400 px  Animated WebP` |
 | `04-selection-overlay.png` | Selection overlay: dimmed desktop, punched-out bright selection, **red** border (recording mode), `940 × 520 px` badge |
-| `05-recording-hud.png` | Recording HUD: red dot, `4.2 s / 15 s`, `51 frames · 12 MB`, Stop button |
+| `05-recording-hud.png` | Recording HUD: red dot, `4.2 s / 15 s`, `51 frames · 12 MB`, Stop button — now rendered in dark appearance so the label is legible (B9) |
 | `06-menu-bar-item.png` | Status-item template icon at menu-bar size |
+| `07-editor-single-frame-clip.png` | **New in round 2 (B10).** A one-frame clip: `1 of 1 frames · 0.1 s`, *Reset trim* disabled, "Single frame — nothing to trim.", and **no** Start/End/Frame sliders |
 
 **These are offscreen renders of the real view hierarchies** (`NSHostingView` / `SelectionOverlayView`
 in off-screen windows, captured via `CALayer.render(in:)`), not desktop captures — see §4.1 for why,
@@ -340,6 +399,51 @@ files render in a browser (§3.4). To close the gap:
 5. Negative case: set *Save to* outside the vault; the clipboard should hold a plain absolute path
    with no Markdown syntax, and pasting it should **not** produce an embed.
 
+### 4.6 Round-2-specific gaps
+
+**The display was not compositing live for most of round 2's verification.** This machine's screen
+slept during the run; ScreenCaptureKit then either reported **0 displays** or kept serving a
+*frozen* composite. This was isolated to the environment, not to TriCap, with a standalone probe
+that uses **no TriCap code**: it creates its own window, confirms ScreenCaptureKit lists it with
+`isOnScreen=true` at `frame=(120, 760, 200, 200)`, then takes three full-display captures with the
+window moved and recoloured between each — and all three are byte-identical
+([scripts/diagnostics/display-compositing-probe.swift](scripts/diagnostics/display-compositing-probe.swift), reproduced in §6).
+
+Consequences, all reported rather than papered over:
+
+- `--selftest` now probes for live compositing (two stills either side of a deliberate on-screen
+  change) and emits **SKIP**, never PASS, for the multi-frame recording expectation when the
+  screen is frozen. The summary line distinguishes "ALL CHECKS PASSED" from "ALL EXECUTED CHECKS
+  PASSED — N SKIPPED".
+- It also detects the 0-display case up front and tells the reviewer to re-run under
+  `caffeinate -dimsu` instead of failing later with a confusing `noDisplaysAvailable`.
+- **A live multi-frame animated-WebP recording was therefore not re-verified in this round.** It
+  *was* verified in the previous round on the same code path (60 captured frames → 52 stored
+  frames → browser-confirmed `animated: true`, `repetitionCount === Infinity`, 4716 ms), and the
+  encoding itself is covered by 21 unit tests. Re-running `caffeinate -dimsu .build/release/TriCap
+  --selftest ./build/selftest` with the display awake and the machine in use should turn the SKIP
+  into a PASS; please do that as part of the review.
+
+**Interactive paths for the round-2 fixes were not exercised by hand** (same reason as §4.2 —
+screen automation was declined). Specifically not manually verified:
+
+| Fix | What a human should do |
+|---|---|
+| A1 | Start a recording, then press `⌥⇧5` again and click *Record Region…* — nothing should happen until the first recording ends. Log line `capture request refused: session already in recording`. |
+| A5 | Start a recording, click into another application, press `Esc` — the recording should abandon. Also confirm `Esc` works normally again immediately afterwards. |
+| B6 | In Settings, assign a shortcut another app already owns — TriCap should keep the old one and say which. (Finding a genuinely-taken combination is the hard part; the roll-back logic itself is unit-tested.) |
+| B9 | Look at the HUD on a real screen in both light and dark system appearance. |
+
+**B8's real trigger was not reproduced.** There is no exFAT or SMB volume on this machine, so
+`link(2)` never actually failed. The fallbacks are covered by forcing each strategy individually
+(11 tests), and the errno-to-fallback mapping (`EPERM`, `ENOTSUP`, `EXDEV`, `EMLINK`, `EINVAL`) is
+from the documented behaviour of those filesystems, not from observation here.
+
+**B7's case-sensitive branch was not exercised on a real case-sensitive volume.** The boot volume
+reports case-*insensitive*. The comparison rule is tested directly as a pure function over path
+components, and `volumeCaseSensitivity(for:)` is tested to agree with whatever this volume reports.
+A case-sensitive APFS volume would exercise the other branch end to end.
+
 ### 4.5 Other gaps
 
 - **HDR / wide-gamut capture** — the machine's display reports sRGB, so the wide-gamut branch of
@@ -379,13 +483,31 @@ files render in a browser (§3.4). To close the gap:
    right and that no legitimate output can trip it (the frame-coalescing and motionless-recording
    cases were the two that did, and both are now handled — see D8/D9).
 
+### 5.1b Round-2 code worth a close look
+
+1. **`RecordingSession.waitForStop()`** — a `CheckedContinuation` resumed from `request(_:)`.
+   Please check the pre-latch path (a stop arriving while `backend.start()` is still running) and
+   that `waiter` can never be resumed twice.
+2. **`RegionRecorder.tick()` / `handleAutoStop`** — the ceiling now latches and invalidates its own
+   timer. Confirm there is no path where `hasAutoStopped` is set but the recording keeps retaining
+   frames, and that `captureOutputState()` is idempotent (it is called from both `finish()` and
+   `cancel()`).
+3. **`ClipTrimmer.trimmedDuration`** — the two-case rule is the whole of A2's semantics. Worth
+   checking the boundary where `range.upperBound == frames.count - 1` and `clipDuration` is
+   *smaller* than the last frame's timestamp (it clamps to 0; `ClipTiming` then floors to
+   `lastTimestamp + nominalInterval`).
+4. **`OutputFileWriter.write`'s nested loop** — a strategy reporting `unsupported` retries the next
+   strategy for the same candidate name, but the outer loop restarts from the strongest strategy on
+   the next name. Correct but mildly wasteful on a volume without hard links; worth confirming the
+   `taken` / `break` / `continue` flow has no path that silently gives up.
+5. **`EditorPresenter.release(_:)`** sets `contentViewController = nil`. Confirm that is safe for a
+   window that is already closing, and that `windowWillClose` cannot re-enter it.
+
 ### 5.2 Known weak spots
 
 - **`FrameConverter` cropping.** SCK's `contentRect`/`scaleFactor` attachments are used to crop an
   over-sized IOSurface. On this machine the delivered buffer already matched the requested size, so
   the crop branch was never taken in a live run. It is reachable on other configurations.
-- **`RecordingHUD.StopProxy` is a singleton.** Only one recording can be in flight (guarded by
-  `AppDelegate.isCapturing`), but it is a global mutable target and would break with concurrent HUDs.
 - **`AnnotationRenderer.drawMosaic` calls `ctx.makeImage()` per mosaic item.** With many mosaics on
   a large clip this is O(items × frames) full-canvas snapshots. Fine for the MVP; a real cost at
   scale.
@@ -395,10 +517,14 @@ files render in a browser (§3.4). To close the gap:
 - **Editor windows are retained in a dictionary keyed by `ObjectIdentifier`** and removed in
   `windowWillClose`. Worth confirming there is no retain cycle through `EditorModel`'s closures
   (`onClosed` captures the window via a local `var`).
-- **Hot-key re-registration** now happens the moment `SettingsStore.settings` changes
-  (`store.onChange` → `registerHotKey()`), not only when the settings window closes. The older
-  `syncHotKeyRegistration()` call after each capture is kept as a belt-and-braces fallback; a
-  reviewer may consider it redundant.
+- **Hot-key re-registration** happens the moment `SettingsStore.settings` changes
+  (`store.onChange` → `registerHotKey(previous:)`); the redundant post-capture
+  `syncHotKeyRegistration()` was removed. `isRollingBackHotKey` guards the one re-entrant path
+  (a roll-back writes the setting, which fires `onChange` again).
+- **A bare Escape is claimed system-wide while a recording runs.** For at most
+  `RecordingLimits.maxDuration` seconds, `Esc` does not reach the focused application. This is
+  deliberate and is released on every exit path (`RecordingChromeController.dismiss()`, which
+  `RecordingSession` always calls), but it is the one behaviour in TriCap that affects other apps.
 
 ### 5.3 Things intentionally simple
 
@@ -423,8 +549,10 @@ swift build && swift build -c release
 # 3. app bundle + the "no external libwebp" gate
 ./scripts/build-app.sh release
 
-# 4. end-to-end capture pipeline (captures a real screen region)
-.build/release/TriCap --selftest ./build/selftest
+# 4. end-to-end capture pipeline (captures a real screen region).
+#    `caffeinate -dimsu` keeps the display awake — without it this machine's screen sleeps
+#    mid-run and ScreenCaptureKit serves a frozen composite (see §4.6).
+caffeinate -dimsu .build/release/TriCap --selftest ./build/selftest
 
 # 5. UI snapshots
 .build/release/TriCap --render-ui-snapshots ./build/ui-snapshots
@@ -437,6 +565,15 @@ open build/release/TriCap.app
 ```
 
 Steps 4 and 5 need Screen & System Audio Recording permission for the binary being run.
+
+To reproduce the "display is not compositing live" finding from §4.6 independently of TriCap:
+
+```bash
+# Creates its own window, confirms SCK lists it as on-screen, then captures the full display
+# three times with the window moved and recoloured between each.
+swiftc -O scripts/diagnostics/display-compositing-probe.swift -o /tmp/probe
+caffeinate -dimsu /tmp/probe
+```
 
 **Housekeeping note.** A copy of the bundle was briefly placed in `/Applications` and
 `~/Applications` while trying to get screen automation to see it; both were removed once that

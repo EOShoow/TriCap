@@ -12,6 +12,8 @@ private func frame(at seconds: TimeInterval, size: Int = 4) -> RecordedFrame {
 struct ClipTrimmerTests {
 
     let frames = (0..<10).map { frame(at: Double($0) / 12.0) }
+    /// A clip that stopped one frame interval after its last frame — the ordinary case.
+    var clipDuration: TimeInterval { 10.0 / 12.0 }
 
     @Test("Trimming keeps the inclusive range and re-bases timestamps to zero")
     func trimsAndRebases() {
@@ -61,19 +63,129 @@ struct ClipTrimmerTests {
 
     @Test("Trimming a clip recomputes its retained byte count")
     func trimClipRecomputesBytes() {
-        let clip = RecordedClip(
-            frames: frames,
-            pixelSize: CGSize(width: 100, height: 100),
-            region: TestFixtures.region,
-            nominalFrameInterval: 1.0 / 12.0,
-            stopReason: .userStopped,
-            droppedFrameCount: 0,
-            colorSpace: nil,
-            retainedBytes: 40
-        )
+        let clip = TestFixtures.clip(frames: frames, wallClockDuration: clipDuration)
         let trimmed = ClipTrimmer.trim(clip: clip, first: 2, last: 5)
         #expect(trimmed.frames.count == 4)
         #expect(trimmed.retainedBytes == 16)
+    }
+}
+
+@Suite("Trimmed duration semantics")
+struct TrimmedDurationTests {
+
+    /// One second of motion at 12 fps, then a completely static screen until the recording was
+    /// stopped at 15 s. ScreenCaptureKit delivers no frames while nothing changes, so the frame
+    /// list stops at ~0.92 s while the recording really ran for 15 s.
+    let staticTailFrames = (0..<12).map { frame(at: Double($0) / 12.0) }
+    let staticTailDuration: TimeInterval = 15.0
+
+    @Test("Keeping the tail keeps the recording's real end time")
+    func keepingTailKeepsRealEnd() {
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: staticTailFrames,
+            range: 0...(staticTailFrames.count - 1),
+            clipDuration: staticTailDuration
+        )
+        // The last frame sat on screen for the remaining ~14 seconds; the clip must say 15 s.
+        #expect(abs(duration - 15.0) < 1e-9)
+    }
+
+    @Test("Trimming the tail off ends at the first dropped frame, not at the recording end")
+    func trimmingTailEndsAtNextFrame() {
+        // Keep frames 0...4; frame 5 is at 5/12 s, so the clip runs exactly that long.
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: staticTailFrames,
+            range: 0...4,
+            clipDuration: staticTailDuration
+        )
+        #expect(abs(duration - 5.0 / 12.0) < 1e-9)
+    }
+
+    @Test("Trimming the head rebases the duration")
+    func trimmingHeadRebases() {
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: staticTailFrames,
+            range: 4...(staticTailFrames.count - 1),
+            clipDuration: staticTailDuration
+        )
+        #expect(abs(duration - (15.0 - 4.0 / 12.0)) < 1e-9)
+    }
+
+    @Test("A single-frame trim in the middle lasts exactly until the next frame")
+    func singleFrameInMiddle() {
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: staticTailFrames, range: 3...3, clipDuration: staticTailDuration
+        )
+        #expect(abs(duration - 1.0 / 12.0) < 1e-9)
+    }
+
+    @Test("A single-frame trim on the last frame lasts until the recording stopped")
+    func singleFrameAtTail() {
+        let last = staticTailFrames.count - 1
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: staticTailFrames, range: last...last, clipDuration: staticTailDuration
+        )
+        #expect(abs(duration - (15.0 - Double(last) / 12.0)) < 1e-9)
+    }
+
+    @Test("A completely static recording is one frame lasting the whole recording")
+    func fullyStaticRecording() {
+        // The screen never changed, so exactly one frame was ever delivered.
+        let frames = [frame(at: 0)]
+        let duration = ClipTrimmer.trimmedDuration(frames: frames, range: 0...0, clipDuration: 15.0)
+        #expect(duration == 15.0)
+    }
+
+    @Test("Trimming a clip carries the recomputed duration into the result")
+    func trimClipCarriesDuration() {
+        let clip = TestFixtures.clip(frames: staticTailFrames, wallClockDuration: staticTailDuration)
+        #expect(abs(clip.duration - 15.0) < 1e-9)
+
+        let keptTail = ClipTrimmer.trim(clip: clip, first: 2, last: staticTailFrames.count - 1)
+        #expect(abs(keptTail.duration - (15.0 - 2.0 / 12.0)) < 1e-9)
+
+        let droppedTail = ClipTrimmer.trim(clip: clip, first: 0, last: 4)
+        #expect(abs(droppedTail.duration - 5.0 / 12.0) < 1e-9)
+    }
+
+    @Test("Duration never goes negative for a degenerate clip duration")
+    func neverNegative() {
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: staticTailFrames, range: 5...(staticTailFrames.count - 1), clipDuration: 0
+        )
+        #expect(duration == 0)
+    }
+}
+
+@Suite("Recorded clip duration")
+struct RecordedClipDurationTests {
+
+    @Test("The measured wall clock wins over the frame span")
+    func wallClockWins() {
+        // 1 s of motion, then 14 s of a static screen.
+        let frames = (0..<12).map { frame(at: Double($0) / 12.0) }
+        let clip = TestFixtures.clip(frames: frames, wallClockDuration: 15.0)
+        #expect(abs(clip.duration - 15.0) < 1e-9)
+    }
+
+    @Test("The last frame always gets at least one nominal interval")
+    func flooredByNominalInterval() {
+        // A recording stopped microseconds after the final frame arrived.
+        let frames = (0..<3).map { frame(at: Double($0) / 12.0) }
+        let clip = TestFixtures.clip(frames: frames, wallClockDuration: 2.0 / 12.0 + 0.0001)
+        #expect(abs(clip.duration - 3.0 / 12.0) < 1e-6)
+    }
+
+    @Test("An empty clip has no duration")
+    func emptyClip() {
+        #expect(TestFixtures.clip(frames: [], wallClockDuration: 5).duration == 0)
+    }
+
+    @Test("A negative measured duration is clamped away")
+    func negativeClamped() {
+        let clip = TestFixtures.clip(frames: [frame(at: 0)], wallClockDuration: -3)
+        #expect(clip.wallClockDuration == 0)
+        #expect(clip.duration > 0)
     }
 }
 
@@ -90,9 +202,39 @@ struct ClipTimingTests {
         #expect(timeline.durationsMs == [83, 84, 83, 83, 83])
     }
 
+    @Test("A measured duration extends the final frame instead of cutting it short")
+    func measuredDurationExtendsLastFrame() throws {
+        // One second of motion then fourteen static seconds: the last frame must hold.
+        let frames = (0..<12).map { frame(at: Double($0) / 12.0) }
+        let timeline = try #require(
+            ClipTiming.timeline(for: frames, nominalFrameInterval: 1.0 / 12.0, totalDuration: 15.0)
+        )
+        #expect(timeline.endTimestampMs == 15_000)
+        #expect(timeline.durationsMs.last == 15_000 - timeline.timestampsMs.last!)
+        #expect(timeline.durationsMs.last! > 13_000)
+    }
+
+    @Test("A measured duration shorter than the frames is ignored in favour of the floor")
+    func shortMeasuredDurationIsFloored() throws {
+        let frames = (0..<4).map { frame(at: Double($0) / 12.0) }
+        let timeline = try #require(
+            ClipTiming.timeline(for: frames, nominalFrameInterval: 1.0 / 12.0, totalDuration: 0.05)
+        )
+        #expect(timeline.endTimestampMs == timeline.timestampsMs.last! + 83)
+    }
+
+    @Test("A single static frame becomes one long frame")
+    func singleStaticFrame() throws {
+        let timeline = try #require(
+            ClipTiming.timeline(for: [frame(at: 0)], nominalFrameInterval: 1.0 / 12.0, totalDuration: 15.0)
+        )
+        #expect(timeline.timestampsMs == [0])
+        #expect(timeline.endTimestampMs == 15_000)
+        #expect(timeline.durationsMs == [15_000])
+    }
+
     @Test("Timestamps are always strictly increasing, even for frames in the same millisecond")
     func forcesStrictlyIncreasing() throws {
-        // Three frames delivered within the same millisecond, then a normal one.
         let frames = [frame(at: 0), frame(at: 0.0001), frame(at: 0.0002), frame(at: 0.5)]
         let timeline = try #require(ClipTiming.timeline(for: frames, nominalFrameInterval: 1.0 / 12.0))
 
@@ -215,4 +357,30 @@ enum TestFixtures {
         displayPixelRect: CGRect(x: 0, y: 0, width: 200, height: 200),
         sourceRectInDisplayPoints: CGRect(x: 0, y: 882, width: 100, height: 100)
     )
+
+    static func clip(
+        frames: [RecordedFrame],
+        wallClockDuration: TimeInterval,
+        colorSpace: ImageProcessing.ColorSpaceOutcome? = nil,
+        stopReason: RecordingStopReason = .userStopped
+    ) -> RecordedClip {
+        RecordedClip(
+            frames: frames,
+            pixelSize: CGSize(width: 100, height: 100),
+            region: region,
+            nominalFrameInterval: 1.0 / 12.0,
+            stopReason: stopReason,
+            droppedFrameCount: 0,
+            colorSpace: colorSpace,
+            retainedBytes: frames.reduce(0) { $0 + $1.pngData.count },
+            wallClockDuration: wallClockDuration
+        )
+    }
+
+    static func clip(frameCount: Int) -> RecordedClip {
+        clip(
+            frames: (0..<frameCount).map { frame(at: Double($0) / 12.0) },
+            wallClockDuration: Double(frameCount) / 12.0
+        )
+    }
 }

@@ -88,6 +88,18 @@ enum UISnapshotRenderer {
             to: directory.appendingPathComponent("03-editor-clip-trim.png")
         )
 
+        // A one-frame clip: the trim and scrub sliders must be absent, not padded to 0...1.
+        let singleFrameModel = EditorModel(
+            source: .clip(syntheticClip(frameCount: 1)),
+            settings: store.settings,
+            onExported: { _ in },
+            onClosed: {}
+        )
+        try write(
+            hosting(EditorView(model: singleFrameModel), size: CGSize(width: 900, height: 700)),
+            to: directory.appendingPathComponent("07-editor-single-frame-clip.png")
+        )
+
         try write(selectionOverlaySnapshot(), to: directory.appendingPathComponent("04-selection-overlay.png"))
         try write(recordingHUDSnapshot(), to: directory.appendingPathComponent("05-recording-hud.png"))
         try write(menuBarSnapshot(), to: directory.appendingPathComponent("06-menu-bar-item.png"))
@@ -128,6 +140,8 @@ enum UISnapshotRenderer {
         let content = offscreenContainer(size: size)
         content.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
         content.layer?.cornerRadius = 12
+        // Matches the live HUD: dark-mode controls on a dark panel.
+        content.appearance = NSAppearance(named: .darkAqua)
 
         let dot = NSView(frame: CGRect(x: 16, y: 24, width: 10, height: 10))
         dot.wantsLayer = true
@@ -149,6 +163,7 @@ enum UISnapshotRenderer {
 
         let stop = NSButton(title: "Stop", target: nil, action: nil)
         stop.bezelStyle = .rounded
+        stop.contentTintColor = .white
         stop.frame = CGRect(x: 196, y: 14, width: 58, height: 28)
         content.addSubview(stop)
 
@@ -376,8 +391,8 @@ enum UISnapshotRenderer {
         )
     }
 
-    private static func syntheticClip() -> RecordedClip {
-        let frames: [RecordedFrame] = (0..<12).map { index in
+    private static func syntheticClip(frameCount: Int = 12) -> RecordedClip {
+        let frames: [RecordedFrame] = (0..<frameCount).map { index in
             let ctx = ImageProcessing.makeContext(width: 640, height: 400)!
             ctx.draw(syntheticDesktop(width: 640, height: 400), in: CGRect(x: 0, y: 0, width: 640, height: 400))
             ctx.setFillColor(CGColor(red: 0.95, green: 0.28, blue: 0.24, alpha: 1))
@@ -393,7 +408,8 @@ enum UISnapshotRenderer {
             stopReason: .userStopped,
             droppedFrameCount: 0,
             colorSpace: nil,
-            retainedBytes: frames.reduce(0) { $0 + $1.pngData.count }
+            retainedBytes: frames.reduce(0) { $0 + $1.pngData.count },
+            wallClockDuration: Double(frames.count) / 12.0
         )
     }
 

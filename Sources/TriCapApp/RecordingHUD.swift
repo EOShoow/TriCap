@@ -14,6 +14,11 @@ public final class RecordingHUD {
     private var elapsedLabel: NSTextField?
     private var frameLabel: NSTextField?
     private var borderWindow: NSWindow?
+    private var escapeNotice: NSTextField?
+
+    /// One proxy per HUD instance. A shared singleton would let a second recording's HUD rebind
+    /// the first one's Stop button.
+    private let stopProxy = HUDStopProxy()
 
     public init() {}
 
@@ -62,10 +67,16 @@ public final class RecordingHUD {
         let window = makeFloatingWindow(size: CGSize(width: 268, height: 56), belowTopOf: region)
         guard let content = window.contentView else { return }
 
-        let stop = NSButton(title: "Stop", target: StopProxy.shared, action: #selector(StopProxy.fire))
-        StopProxy.shared.handler = onStop
+        // The HUD is a dark panel, so its controls must be drawn in dark mode; the default
+        // (light) appearance renders the push button as dark text on a dark bezel, which is
+        // what the first UI snapshot showed.
+        content.appearance = NSAppearance(named: .darkAqua)
+
+        let stop = NSButton(title: "Stop", target: stopProxy, action: #selector(HUDStopProxy.fire))
+        stopProxy.handler = onStop
         stop.bezelStyle = .rounded
         stop.keyEquivalent = "\r"
+        stop.contentTintColor = .white
         stop.frame = CGRect(x: 196, y: 14, width: 58, height: 28)
         content.addSubview(stop)
 
@@ -99,7 +110,7 @@ public final class RecordingHUD {
     }
 
     public func dismiss() {
-        StopProxy.shared.handler = nil
+        stopProxy.handler = nil
         for window in [hudWindow, borderWindow, countdownWindow].compactMap({ $0 }) {
             window.orderOut(nil)
             window.close()
@@ -109,6 +120,19 @@ public final class RecordingHUD {
         countdownWindow = nil
         elapsedLabel = nil
         frameLabel = nil
+        escapeNotice = nil
+    }
+
+    /// Replace the "Esc to cancel" affordance with an honest notice when the global Escape hot key
+    /// could not be claimed (another application already owns it).
+    public func showEscapeUnavailableNotice() {
+        guard let content = hudWindow?.contentView, escapeNotice == nil else { return }
+        let notice = NSTextField(labelWithString: "Esc unavailable — use Stop")
+        notice.font = .systemFont(ofSize: 10)
+        notice.textColor = NSColor.systemYellow
+        notice.frame = CGRect(x: 34, y: -4, width: 200, height: 14)
+        content.addSubview(notice)
+        escapeNotice = notice
     }
 
     // MARK: - Chrome
@@ -208,9 +232,9 @@ private final class CancelWatcher {
 }
 
 /// `NSButton` needs an Objective-C target; this keeps the closure alive without leaking it.
+/// Deliberately *not* a singleton — see `RecordingHUD.stopProxy`.
 @MainActor
-private final class StopProxy: NSObject {
-    static let shared = StopProxy()
+private final class HUDStopProxy: NSObject {
     var handler: (() -> Void)?
 
     @objc func fire() { handler?() }

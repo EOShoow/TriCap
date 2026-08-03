@@ -1,5 +1,6 @@
 import AnnotationCore
 import AppKit
+import ApplicationServices
 import CaptureCore
 import CoreGraphics
 import ExportCore
@@ -50,11 +51,21 @@ enum CaptureSelfTest {
     // MARK: - Steps
 
     private static var failures = 0
+    private static var skipped = 0
 
     private static func check(_ label: String, _ condition: Bool, detail: String = "") {
         let mark = condition ? "PASS" : "FAIL"
         if !condition { failures += 1 }
         print("  \(mark)  \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+    }
+
+    /// A check whose precondition is objectively absent in this environment.
+    ///
+    /// Reported as SKIP rather than PASS so the run never claims to have verified something it
+    /// did not, and never as FAIL so an environment limitation is not mistaken for a defect.
+    private static func skip(_ label: String, reason: String) {
+        skipped += 1
+        print("  SKIP  \(label)  — not verified in this run: \(reason)")
     }
 
     private static func section(_ title: String) {
@@ -79,6 +90,17 @@ enum CaptureSelfTest {
         do {
             let content = try await ScreenRecordingPermission.shareableContent()
             check("SCShareableContent reachable", true, detail: "\(content.displays.count) display(s), \(content.applications.count) app(s)")
+            guard !content.displays.isEmpty else {
+                // NSScreen still lists the panel, but ScreenCaptureKit publishes no capturable
+                // display while it is asleep or the session is locked. Say so plainly instead of
+                // failing later with a confusing "noDisplaysAvailable" from inside the capture.
+                check("a capturable display is available", false, detail: "ScreenCaptureKit reports 0 displays")
+                print("")
+                print("  The display appears to be asleep or the session is locked, so nothing can")
+                print("  be captured. Re-run with the display awake, e.g.:")
+                print("    caffeinate -dimsu .build/release/TriCap --selftest ./build/selftest")
+                return false
+            }
         } catch {
             check("SCShareableContent reachable", false, detail: "\(error)")
             print("\n  Screen Recording permission is not granted to this binary.")
@@ -280,6 +302,29 @@ enum CaptureSelfTest {
         // Animate something inside the captured region so successive frames differ.
         let mover = MovingWindow(region: region)
         mover.show()
+
+        // Before asserting on frame count, establish that the window server is actually
+        // compositing live: capture two stills either side of a deliberate change. On a machine
+        // whose display is asleep or whose session is detached, ScreenCaptureKit keeps reporting
+        // the display and keeps serving a frozen composite, and every recording would be a single
+        // frame through no fault of the recorder.
+        var motionIsVisible = false
+        do {
+            let before = try await StillCaptureService.capture(region: region)
+            mover.step()
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            let after = try await StillCaptureService.capture(region: region)
+            motionIsVisible = ImageProcessing.pngData(from: before.image)
+                != ImageProcessing.pngData(from: after.image)
+        } catch {
+            motionIsVisible = false
+        }
+        if !motionIsVisible {
+            print("  NOTE: the screen is not compositing live (two stills either side of a")
+            print("        deliberate on-screen change are byte-identical). Multi-frame")
+            print("        expectations are skipped; everything else still runs.")
+        }
+
         try? await Task.sleep(nanoseconds: 5_000_000_000)
         mover.hide()
 
@@ -290,10 +335,34 @@ enum CaptureSelfTest {
             check("recording finishes with frames", false, detail: "\(error)")
             return false
         }
+        if clip.stopReason == .streamError {
+            print("  NOTE: the capture stream ended early (stop=streamError). This normally means")
+            print("        the display went to sleep mid-run — re-run under `caffeinate -dimsu`.")
+        }
+        let recordingDetail = "\(clip.frames.count) frames, \(String(format: "%.2f", clip.duration)) s, \(clip.retainedBytes / 1024) KB retained, stop=\(clip.stopReason.rawValue), dropped=\(clip.droppedFrameCount)"
+        check("recording finishes with at least one frame", !clip.frames.isEmpty, detail: recordingDetail)
+        if motionIsVisible {
+            check("recording captured the on-screen motion as multiple frames",
+                  clip.frames.count > 1, detail: recordingDetail)
+        } else {
+            skip("recording captured the on-screen motion as multiple frames",
+                 reason: "the display is not compositing live (\(recordingDetail))")
+        }
         check(
-            "recording finishes with frames",
-            clip.frames.count > 1,
-            detail: "\(clip.frames.count) frames, \(String(format: "%.2f", clip.duration)) s, \(clip.retainedBytes / 1024) KB retained, stop=\(clip.stopReason.rawValue), dropped=\(clip.droppedFrameCount)"
+            "colour-space outcome survived teardown",
+            clip.colorSpace != nil,
+            detail: clip.colorSpace.map { "\($0.sourceName) converted=\($0.converted) wide=\($0.wasWideGamutOrHDR)" }
+                ?? "nil — the recorder lost it"
+        )
+        if let notice = clip.colorSpaceNotice {
+            print("  editor would show: \(notice)")
+        } else {
+            print("  no colour-space notice (capture was already sRGB)")
+        }
+        check(
+            "measured wall clock is consistent with the frame span",
+            clip.wallClockDuration > 0 && clip.duration >= clip.wallClockDuration - 0.001,
+            detail: String(format: "wall %.3f s, duration %.3f s", clip.wallClockDuration, clip.duration)
         )
         check("retained memory stayed under the ceiling", clip.retainedBytes <= limits.maxFrameBufferBytes)
         check("frame count stayed under the ceiling", clip.frames.count <= limits.maxFrameCount)
@@ -307,11 +376,21 @@ enum CaptureSelfTest {
         let head = min(2, max(0, clip.frames.count - 2))
         let tail = max(head, clip.frames.count - 3)
         let trimmed = ClipTrimmer.trim(frames: clip.frames, to: head...tail)
+        let trimmedSpan = ClipTrimmer.trimmedDuration(
+            frames: clip.frames, range: head...tail, clipDuration: clip.duration
+        )
         check("trim keeps the expected frame count", trimmed.count == tail - head + 1,
               detail: "kept \(trimmed.count) of \(clip.frames.count) (indices \(head)...\(tail))")
         check("trimmed clip restarts at t=0", trimmed.first?.timestamp == 0)
+        check("trimmed span is positive and no longer than the clip",
+              trimmedSpan > 0 && trimmedSpan <= clip.duration + 0.001,
+              detail: String(format: "%.3f s of %.3f s", trimmedSpan, clip.duration))
 
-        guard let timeline = ClipTiming.timeline(for: trimmed, nominalFrameInterval: clip.nominalFrameInterval) else {
+        guard let timeline = ClipTiming.timeline(
+            for: trimmed,
+            nominalFrameInterval: clip.nominalFrameInterval,
+            totalDuration: trimmedSpan
+        ) else {
             check("timeline builds", false)
             return false
         }
@@ -360,22 +439,33 @@ enum CaptureSelfTest {
             let info = result.animationInfo
             check("animated WebP written", true,
                   detail: "\(result.url.lastPathComponent) \(result.byteCount) bytes")
-            check("container is animated WebP", result.container == .webpAnimated)
+            let collapsed = result.collapsedToSingleFrame
+            if collapsed {
+                print("  NOTE: every retained frame was identical, so libwebp wrote a single-frame")
+                print("        still WebP. The animation-specific checks below do not apply.")
+            }
+            check(
+                "container matches what libwebp produced",
+                collapsed ? result.container == .webpStill : result.container == .webpAnimated,
+                detail: result.container.rawValue
+            )
             // libwebp coalesces frames identical to their predecessor, so the stored count can be
             // lower than the submitted count; the invariant that must hold exactly is duration.
             check("stored frame count is within the submitted count",
                   (info?.frameCount ?? 0) >= 1 && (info?.frameCount ?? .max) <= trimmed.count,
                   detail: "\(info?.frameCount ?? -1) stored of \(trimmed.count) submitted (identical frames merged)")
             check("total playback duration is preserved",
-                  info?.totalDurationMs == timeline.endTimestampMs,
+                  collapsed || info?.totalDurationMs == timeline.endTimestampMs,
                   detail: "\(info?.totalDurationMs ?? -1) ms vs \(timeline.endTimestampMs) ms")
             check("canvas size round-trips",
                   info?.canvasWidth == Int(clip.pixelSize.width) && info?.canvasHeight == Int(clip.pixelSize.height),
                   detail: "\(info?.canvasWidth ?? -1)x\(info?.canvasHeight ?? -1)")
-            check("loop count is 0 (infinite)", info?.loopCount == 0)
+            check("loop count is 0 (infinite)", collapsed || info?.loopCount == 0,
+                  detail: "\(info?.loopCount ?? -1)")
             check("timestamps read back strictly increasing",
                   zip(info?.frameTimestampsMs ?? [], (info?.frameTimestampsMs ?? []).dropFirst()).allSatisfy { $1 > $0 })
-            check("every frame duration > 0", (info?.durationsMs ?? []).allSatisfy { $0 > 0 })
+            check("every frame duration > 0",
+                  collapsed || (info?.durationsMs ?? []).allSatisfy { $0 > 0 })
             check("markdown reference is vault-relative",
                   result.reference == "![clip](assets/clip.webp)", detail: result.reference)
             print("  frame timestamps (ms): \(info?.frameTimestampsMs ?? [])")
@@ -424,9 +514,229 @@ enum CaptureSelfTest {
         check("cancelling wrote no file", filesAfterCancel == fileCountAfterExports,
               detail: "\(filesAfterCancel) files in assets/, unchanged from \(fileCountAfterExports)")
 
+        // ---- Static screen: the duration ceiling must fire from the wall clock -------------
+        section("Static-screen recording (duration ceiling)")
+        // ScreenCaptureKit only delivers a `.complete` frame when the picture changed, so a
+        // frame-driven duration check never fires on a still screen. This records a corner of the
+        // desktop — deliberately *not* animating anything — with a short ceiling and checks that
+        // the recorder stops itself anyway, exactly once, at the right time.
+        let staticLimits = RecordingLimits(frameRate: 12, maxDuration: 3, maxLongEdgePixels: 640)
+        let staticRegionRect = CGRect(
+            x: main.appKitBounds.minX + 4,
+            y: main.appKitBounds.minY + 4,
+            width: 160,
+            height: 120
+        )
+        if let staticRegion = CaptureRegion(appKitGlobalRect: staticRegionRect, display: main) {
+            let staticRecorder = RegionRecorder(region: staticRegion, limits: staticLimits)
+            var autoStops: [RecordingStopReason] = []
+            staticRecorder.onAutoStop = { autoStops.append($0) }
+
+            let started = ContinuousClock.now
+            do {
+                try await staticRecorder.start()
+                // Wait past the ceiling without touching the screen.
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                let elapsedAtStop = (ContinuousClock.now - started).timeIntervalValue
+
+                check(
+                    "duration ceiling fired without any new frames",
+                    autoStops.contains(.durationLimit),
+                    detail: autoStops.isEmpty ? "no auto-stop at all" : autoStops.map(\.rawValue).joined(separator: ",")
+                )
+                check(
+                    "it fired exactly once",
+                    autoStops.count == 1,
+                    detail: "\(autoStops.count) auto-stop callback(s)"
+                )
+                check(
+                    "it fired at the ceiling, not when the next frame happened to arrive",
+                    autoStops.contains(.durationLimit) && elapsedAtStop >= staticLimits.maxDuration,
+                    detail: String(format: "waited %.1f s for a %.0f s ceiling", elapsedAtStop, staticLimits.maxDuration)
+                )
+
+                let staticClip = try await staticRecorder.finish()
+
+                // The regression assertion. The old check lived in the frame handler, so it could
+                // only fire once a frame arrived with elapsed > maxDuration — which requires the
+                // frame span itself to exceed the ceiling. A frame span *below* the ceiling proves
+                // the stop came from the wall clock and not from a frame.
+                let staticFrameSpan = (staticClip.frames.last?.timestamp ?? 0)
+                    - (staticClip.frames.first?.timestamp ?? 0)
+                check(
+                    "the ceiling fired although no frame ever passed it",
+                    staticFrameSpan < staticLimits.maxDuration,
+                    detail: String(
+                        format: "last frame at %.2f s, ceiling %.0f s — a frame-driven check could not have fired",
+                        staticFrameSpan, staticLimits.maxDuration
+                    )
+                )
+                check(
+                    "static clip reports the real recorded length, not the frame span",
+                    staticClip.duration >= staticLimits.maxDuration - 0.5,
+                    detail: String(
+                        format: "%d frame(s), frame span %.2f s, reported duration %.2f s",
+                        staticClip.frames.count,
+                        (staticClip.frames.last?.timestamp ?? 0) - (staticClip.frames.first?.timestamp ?? 0),
+                        staticClip.duration
+                    )
+                )
+                check("static clip stop reason is the duration limit",
+                      staticClip.stopReason == .durationLimit,
+                      detail: staticClip.stopReason.rawValue)
+
+                // Export it and confirm the animation really is that long.
+                let staticTimeline = ClipTiming.timeline(
+                    for: staticClip.frames,
+                    nominalFrameInterval: staticClip.nominalFrameInterval,
+                    totalDuration: staticClip.duration
+                )
+                if let staticTimeline {
+                    check(
+                        "exported timeline covers the whole recording",
+                        Double(staticTimeline.endTimestampMs) >= (staticLimits.maxDuration - 0.5) * 1000,
+                        detail: "\(staticTimeline.endTimestampMs) ms across \(staticTimeline.frameCount) frame(s)"
+                    )
+
+                    let staticSource = AnimationFrameSource(
+                        frameCount: staticClip.frames.count,
+                        timestampsMs: staticTimeline.timestampsMs,
+                        endTimestampMs: staticTimeline.endTimestampMs,
+                        canvasSize: staticClip.pixelSize
+                    ) { index in
+                        guard let image = staticClip.frames[index].decodedImage() else {
+                            throw TriCapError.encodingFailed("static frame \(index) failed to decode")
+                        }
+                        return image
+                    }
+                    do {
+                        let staticResult = try ExportService.exportAnimation(
+                            source: staticSource, annotations: [], options: .default,
+                            directory: insideVault, baseName: "static", vaultRoot: vaultRoot, linkStyle: .markdown
+                        )
+                        check(
+                            "static recording exports successfully",
+                            true,
+                            detail: "\(staticResult.url.lastPathComponent) container=\(staticResult.container.rawValue) collapsed=\(staticResult.collapsedToSingleFrame)"
+                        )
+                        if let info = staticResult.animationInfo, !staticResult.collapsedToSingleFrame {
+                            check(
+                                "exported static animation runs for the full recording",
+                                Double(info.totalDurationMs) >= (staticLimits.maxDuration - 0.5) * 1000,
+                                detail: "\(info.totalDurationMs) ms"
+                            )
+                        }
+                    } catch {
+                        check("static recording exports successfully", false, detail: "\(error)")
+                    }
+                } else {
+                    check("static clip produced a timeline", false)
+                }
+            } catch {
+                check("static recording starts", false, detail: "\(error)")
+            }
+        } else {
+            check("static region resolves", false)
+        }
+
+        // ---- Global cancel key -------------------------------------------------------------
+        section("Recording-cancel hot key")
+        // The recording cancel key has to work while another application is focused, which a
+        // local NSEvent monitor cannot do. Carbon accepts a modifier-less key code and needs no
+        // Accessibility permission — this proves both, and that claiming it leaves the user's
+        // configurable capture shortcut alone.
+        print("  AXIsProcessTrusted() = \(AXIsProcessTrusted())  (Accessibility is never requested)")
+
+        let primaryCombo = HotKeyCombo.default
+        var primaryFired = 0
+        let primaryClaimed = GlobalHotKeyMonitor.shared.register(primaryCombo, in: .primaryCapture) {
+            primaryFired += 1
+        }
+        check("primary capture shortcut registers", primaryClaimed, detail: primaryCombo.displayString)
+
+        var cancelFired = 0
+        let escapeClaimed = GlobalHotKeyMonitor.shared.register(
+            .bareEscape, in: .recordingCancel, allowingNoModifiers: true
+        ) { cancelFired += 1 }
+        check("a bare Escape can be claimed system-wide without Accessibility", escapeClaimed)
+        check("claiming Escape leaves the capture shortcut registered",
+              GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == primaryCombo,
+              detail: GlobalHotKeyMonitor.shared.combo(in: .primaryCapture)?.displayString ?? "nil")
+        check("the two slots hold different combinations",
+              GlobalHotKeyMonitor.shared.combo(in: .recordingCancel) == .bareEscape)
+
+        GlobalHotKeyMonitor.shared.unregister(.recordingCancel)
+        check("releasing Escape does not release the capture shortcut",
+              !GlobalHotKeyMonitor.shared.isRegistered(.recordingCancel)
+                  && GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == primaryCombo)
+
+        // Re-claiming after release must work, because every recording does it.
+        let reclaimed = GlobalHotKeyMonitor.shared.register(
+            .bareEscape, in: .recordingCancel, allowingNoModifiers: true
+        ) { cancelFired += 1 }
+        check("Escape can be re-claimed for the next recording", reclaimed)
+        GlobalHotKeyMonitor.shared.unregister(.recordingCancel)
+
+        check("a modifier-less combination is refused for the configurable shortcut",
+              !GlobalHotKeyMonitor.shared.register(.bareEscape, in: .primaryCapture) {})
+        // That refusal left the primary slot empty; restore it so the app-level invariant holds.
+        _ = GlobalHotKeyMonitor.shared.register(primaryCombo, in: .primaryCapture) { primaryFired += 1 }
+        GlobalHotKeyMonitor.shared.unregisterAll()
+        check("all hot keys released at the end of the run",
+              GlobalHotKeyMonitor.shared.combo(in: .primaryCapture) == nil
+                  && GlobalHotKeyMonitor.shared.combo(in: .recordingCancel) == nil)
+
+        // ---- Editor window lifecycle -------------------------------------------------------
+        section("Editor window lifecycle")
+        // Automated evidence for the retain cycle fix: build a real clip editor through the same
+        // presenter the app uses, close it, and confirm the window, the model and the frames it
+        // held are all deallocated.
+        do {
+            let presenter = EditorPresenter()
+            var settings = AppSettings()
+            settings.saveDirectoryPath = directory.appendingPathComponent("editor-lifecycle").path
+
+            weak var weakWindow: NSWindow?
+            weak var weakModel: EditorModel?
+
+            autoreleasepool {
+                let handle = presenter.present(
+                    source: .clip(clip),
+                    settings: settings,
+                    windowDelegate: nil,
+                    orderFront: false,
+                    onExported: { _ in }
+                )
+                weakWindow = handle.window
+                weakModel = handle.model
+                check("editor window created", handle.window != nil && handle.model != nil)
+                check("presenter owns exactly one window", presenter.openWindowCount == 1)
+                if let window = handle.window {
+                    presenter.release(window)
+                    window.close()
+                }
+            }
+
+            // Give AppKit a few main-actor turns to drain its own autorelease pools.
+            for _ in 0..<20 { try? await Task.sleep(nanoseconds: 10_000_000) }
+            autoreleasepool {}
+
+            check("presenter released the window", presenter.openWindowCount == 0)
+            check("EditorModel deallocated after close", weakModel == nil,
+                  detail: weakModel == nil ? "" : "still alive — retain cycle")
+            check("editor NSWindow deallocated after close", weakWindow == nil,
+                  detail: weakWindow == nil ? "" : "still alive — retain cycle")
+        }
+
         // ---- Summary ----------------------------------------------------------------------
         section("Summary")
-        print(failures == 0 ? "  ALL CHECKS PASSED" : "  \(failures) CHECK(S) FAILED")
+        if failures == 0 {
+            print(skipped == 0
+                  ? "  ALL CHECKS PASSED"
+                  : "  ALL EXECUTED CHECKS PASSED — \(skipped) SKIPPED (see SKIP lines above)")
+        } else {
+            print("  \(failures) CHECK(S) FAILED\(skipped == 0 ? "" : ", \(skipped) SKIPPED")")
+        }
         print("  artefacts: \(directory.path)")
         return failures == 0
     }
@@ -445,7 +755,7 @@ private final class MovingWindow {
     private let window: NSWindow
     private let view: NSView
     private var timer: Timer?
-    private var step = 0
+    private var frameIndex = 0
 
     init(region: CaptureRegion) {
         let rect = region.appKitGlobalRect
@@ -477,12 +787,17 @@ private final class MovingWindow {
         self.timer = timer
     }
 
+    /// Advance the animation one frame by hand (used by the compositing probe).
+    func step(_ times: Int = 1) {
+        for _ in 0..<max(1, times) { tick() }
+    }
+
     private func tick() {
-        step += 1
-        let hue = CGFloat(step % 20) / 20.0
+        frameIndex += 1
+        let hue = CGFloat(frameIndex % 20) / 20.0
         view.layer?.backgroundColor = NSColor(hue: hue, saturation: 0.9, brightness: 0.95, alpha: 1).cgColor
         let travel = max(0, regionRect.width - window.frame.width - 40)
-        let x = regionRect.minX + 20 + travel * CGFloat(step % 20) / 20.0
+        let x = regionRect.minX + 20 + travel * CGFloat(frameIndex % 20) / 20.0
         window.setFrameOrigin(CGPoint(x: x, y: window.frame.origin.y))
     }
 

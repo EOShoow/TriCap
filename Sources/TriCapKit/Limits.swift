@@ -73,3 +73,15 @@ extension Comparable {
         min(max(self, range.lowerBound), range.upperBound)
     }
 }
+
+extension Duration {
+    /// `Duration` expressed as a `TimeInterval`.
+    ///
+    /// `ContinuousClock` arithmetic yields a `Duration`, while the capture pipeline works in
+    /// seconds. Deliberately not named `seconds` — that would collide with the
+    /// `Duration.seconds(_:)` static factory and resolve to it at the call site.
+    public var timeIntervalValue: TimeInterval {
+        let parts = components
+        return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+    }
+}

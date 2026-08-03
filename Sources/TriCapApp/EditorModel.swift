@@ -75,7 +75,7 @@ public final class EditorModel: ObservableObject {
             canvasSize = clip.pixelSize
             format = .animatedWebP
             trimEnd = max(0, clip.frames.count - 1)
-            colorSpaceNotice = clip.colorSpace?.userFacingNotice
+            colorSpaceNotice = clip.colorSpaceNotice
             truncationNotice = Self.truncationNotice(for: clip)
         }
 
@@ -90,7 +90,7 @@ public final class EditorModel: ObservableObject {
     private static func truncationNotice(for clip: RecordedClip) -> String? {
         switch clip.stopReason {
         case .durationLimit:
-            return "Recording stopped at the \(Int(clip.nominalFrameInterval > 0 ? clip.duration.rounded() : 0)) s duration limit."
+            return "Recording stopped at the \(Int(clip.duration.rounded())) s duration limit."
         case .frameCountLimit:
             return "Recording stopped at the frame-count limit (\(clip.frames.count) frames)."
         case .memoryLimit:
@@ -111,11 +111,29 @@ public final class EditorModel: ObservableObject {
 
     public var trimmedFrameCount: Int { max(0, trimEnd - trimStart + 1) }
 
+    /// A one-frame clip has no trim handles and no scrub positions.
+    public var isTrimmable: Bool { ClipTrimUI.isTrimmable(frameCount: frameCount) }
+
+    /// Range for the Start/End handles. Only read when ``isTrimmable``.
+    public var trimHandleRange: ClosedRange<Double> {
+        ClipTrimUI.handleRange(frameCount: frameCount) ?? 0...0
+    }
+
+    /// Range for the preview scrubber, always inside the current trim.
+    public var previewScrubRange: ClosedRange<Double> {
+        ClipTrimUI.scrubRange(trimStart: trimStart, trimEnd: trimEnd) ?? Double(trimStart)...Double(trimStart)
+    }
+
+    /// Length the trimmed clip will actually play for.
+    ///
+    /// Uses the same rule as the exporter (``ClipTrimmer/trimmedDuration(frames:range:clipDuration:)``):
+    /// keeping the tail keeps the recording's real end time, so a final frame that sat unchanged
+    /// for ten seconds is reported — and exported — as ten seconds, not as one frame interval.
     public var trimmedDuration: TimeInterval {
-        guard case .clip(let clip) = source, !clip.frames.isEmpty else { return 0 }
-        let start = clip.frames[trimStart.clamped(to: 0...(clip.frames.count - 1))].timestamp
-        let end = clip.frames[trimEnd.clamped(to: 0...(clip.frames.count - 1))].timestamp
-        return (end - start) + clip.nominalFrameInterval
+        guard case .clip(let clip) = source, !clip.frames.isEmpty,
+              let range = ClipTrimmer.normalizedRange(first: trimStart, last: trimEnd, count: clip.frames.count)
+        else { return 0 }
+        return ClipTrimmer.trimmedDuration(frames: clip.frames, range: range, clipDuration: clip.duration)
     }
 
     /// The image drawn underneath the annotations right now.
@@ -187,13 +205,15 @@ public final class EditorModel: ObservableObject {
             }
 
         case .clip(let clip):
-            let trimmed = ClipTrimmer.trim(
-                frames: clip.frames,
-                to: ClipTrimmer.normalizedRange(first: trimStart, last: trimEnd, count: clip.frames.count) ?? 0...0
+            let range = ClipTrimmer.normalizedRange(first: trimStart, last: trimEnd, count: clip.frames.count) ?? 0...0
+            let trimmed = ClipTrimmer.trim(frames: clip.frames, to: range)
+            let trimmedSpan = ClipTrimmer.trimmedDuration(
+                frames: clip.frames, range: range, clipDuration: clip.duration
             )
             guard let timeline = ClipTiming.timeline(
                 for: trimmed,
-                nominalFrameInterval: clip.nominalFrameInterval
+                nominalFrameInterval: clip.nominalFrameInterval,
+                totalDuration: trimmedSpan
             ) else {
                 isExporting = false
                 errorMessage = TriCapError.noFramesCaptured.localizedDescription

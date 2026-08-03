@@ -10,6 +10,8 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 - **Global shortcut** (default `⌥⇧5`) opens a full-screen region picker across every display.
 - In the picker: drag to capture a **screenshot**, press **R** to switch to **recording** mode
   (**S** switches back), **Esc** cancels.
+- While a recording runs, **Esc** cancels it from anywhere — TriCap claims a system-wide Escape
+  for the duration of the recording only, and releases it as soon as the recording ends.
 - Recording gets an optional **countdown**, a floating **stop** control with live elapsed time and
   frame count, and **head/tail trimming** in the editor.
 - **Annotate** with arrow, rectangle, text, freehand pen and mosaic — with undo/redo. For a clip
@@ -68,7 +70,7 @@ TriCap has no Dock icon — look for the viewfinder icon in the menu bar.
 ./scripts/test.sh
 ```
 
-134 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
+190 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
 `Testing.framework` on the search path unless Xcode is the active developer directory; the script
 adds the `-F` and `-rpath` flags that make `swift test` work with CLT only. With Xcode installed,
 plain `swift test` also works.
@@ -76,8 +78,13 @@ plain `swift test` also works.
 ### End-to-end self-test
 
 ```bash
-./scripts/build-app.sh debug && .build/debug/TriCap --selftest ./build/selftest
+./scripts/build-app.sh debug
+caffeinate -dimsu .build/debug/TriCap --selftest ./build/selftest
 ```
+
+`caffeinate -dimsu` keeps the display awake: if the screen sleeps mid-run, ScreenCaptureKit serves
+a frozen composite and every recording collapses to one frame. The self-test detects that state
+and reports the affected expectations as **SKIP** rather than PASS or FAIL.
 
 Drives the real pipeline — permission, ScreenCaptureKit still capture, annotation compositing,
 PNG/JPEG/WebP encoding, a 5-second recording, trimming, animated-WebP encoding — and re-reads
@@ -141,8 +148,9 @@ If the exported file is inside the configured vault root you get a relative refe
 ```
 
 If it is anywhere else you get the plain absolute path, because a relative link would be a lie.
-Containment is checked component-wise on symlink-resolved, case-insensitively compared paths, so
-`/tmp` vs `/private/tmp` agrees and `/Vault` does not swallow `/VaultBackup`.
+Containment is checked component-wise on symlink-resolved paths — so `/tmp` and `/private/tmp`
+agree and `/Vault` does not swallow `/VaultBackup` — and names are compared using the *volume's own*
+case rule, because on a case-sensitive volume `Vault/` and `vault/` really are different folders.
 
 ---
 
@@ -163,6 +171,12 @@ stream is pinned to sRGB. If a capture arrives in a wide-gamut or HDR space, Tri
 on the retained frame buffer (512 MB by default), and the long-edge cap on each frame. Frames are
 held PNG-compressed, and the animated encoder pulls them back one at a time, so peak usage is one
 decoded frame rather than the whole clip.
+
+**Static screens.** ScreenCaptureKit only sends a frame when the picture changed, so TriCap
+measures a recording's length with a monotonic clock rather than from frame timestamps. A
+recording of one second of motion followed by fourteen static seconds is a fifteen-second
+animation whose last frame holds for fourteen seconds — and the duration limit still stops it on
+time even if nothing ever moves.
 
 **Animated-WebP frame coalescing.** libwebp merges a frame identical to its predecessor into that
 frame's duration. The stored frame count is therefore often *lower* than the number submitted —

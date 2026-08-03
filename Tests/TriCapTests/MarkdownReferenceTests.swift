@@ -55,10 +55,15 @@ struct MarkdownReferenceTests {
         #expect(MarkdownReference.relativePath(of: sneaky, inside: vault) == nil)
     }
 
-    @Test("Containment is case-insensitive, matching APFS's default behaviour")
-    func caseInsensitiveMatching() {
+    @Test("Containment follows the volume's own case rule")
+    func caseSensitivityFollowsVolume() {
+        // The comparison rule itself is covered exhaustively in `MarkdownCaseSensitivityTests`;
+        // this pins that the default overload asks the volume rather than assuming.
         let file = URL(fileURLWithPath: "/Users/someone/documents/vault/assets/shot.png")
-        #expect(MarkdownReference.relativePath(of: file, inside: vault) == "assets/shot.png")
+        let expected: String? = MarkdownReference.volumeCaseSensitivity(for: vault) == .insensitive
+            ? "assets/shot.png"
+            : nil
+        #expect(MarkdownReference.relativePath(of: file, inside: vault) == expected)
     }
 
     @Test("Symlinked roots resolve so /tmp and /private/tmp agree")

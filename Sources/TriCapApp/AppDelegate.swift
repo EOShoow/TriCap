@@ -24,11 +24,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
-    private var editorWindows: [ObjectIdentifier: NSWindow] = [:]
+    private let editorPresenter = EditorPresenter()
 
     private var selector: RegionSelector?
-    private var recorder: RegionRecorder?
-    private var isCapturing = false
+    /// The one live recording, if any. Owned by the running `Task` in `beginCapture`.
+    private var recordingSession: RecordingSession?
+
+    /// The single gate every capture entry point goes through. It stays occupied for the whole
+    /// pipeline — selection, countdown, recording, teardown and the editor hand-off — so a second
+    /// hot-key press or menu click while a recording is live is refused instead of overwriting the
+    /// live recorder, HUD and cancel key.
+    private let gate = CaptureSessionGate()
+
+    /// Guards against `registerHotKey()` re-entering itself when a failed registration rolls the
+    /// stored setting back (which itself fires `store.onChange`).
+    private var isRollingBackHotKey = false
 
     // MARK: - Lifecycle
 
@@ -38,9 +48,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
 
         store.onChange = { [weak self] previous, current in
-            guard let self else { return }
-            if previous.hotKey != current.hotKey { self.registerHotKey() }
-            self.refreshMenu()
+            guard let self, !self.isRollingBackHotKey else { return }
+            if previous.hotKey != current.hotKey {
+                self.registerHotKey(previous: previous.hotKey)
+            } else {
+                self.refreshMenu()
+            }
         }
 
         if let error = store.prepareSaveDirectory() {
@@ -50,7 +63,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
-        GlobalHotKeyMonitor.shared.unregister()
+        GlobalHotKeyMonitor.shared.unregisterAll()
     }
 
     public func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
@@ -121,17 +134,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = buildMenu()
     }
 
-    private func registerHotKey() {
-        let combo = store.settings.hotKey
-        let registered = GlobalHotKeyMonitor.shared.register(combo) { [weak self] in
-            Task { @MainActor in self?.beginCapture(mode: .still) }
+    /// Apply the configured shortcut, rolling back to the previous one if the new one is taken.
+    ///
+    /// The failure mode this guards against: `RegisterEventHotKey` needs the old key released
+    /// before the new one is claimed, so a rejected new combination used to leave TriCap with no
+    /// working shortcut at all.
+    private func registerHotKey(previous: HotKeyCombo? = GlobalHotKeyMonitor.shared.registeredCombo) {
+        let desired = store.settings.hotKey
+        let outcome = HotKeyRegistrationPolicy.apply(desired: desired, previous: previous) { combo in
+            GlobalHotKeyMonitor.shared.register(combo, in: .primaryCapture) { [weak self] in
+                Task { @MainActor in self?.beginCapture(mode: .still) }
+            }
         }
-        if !registered {
+
+        if outcome.rolledBack, let active = outcome.active {
+            // Put the setting back so the UI, the menu and the registration all agree.
+            isRollingBackHotKey = true
+            store.settings.hotKey = active
+            isRollingBackHotKey = false
             presentAlert(
                 title: "Shortcut unavailable",
-                message: "Another app already uses \(combo.displayString). Pick a different shortcut in TriCap settings."
+                message: "Another app already uses \(desired.displayString), so TriCap kept \(active.displayString). Pick a different shortcut in Settings."
+            )
+        } else if outcome.lostShortcut {
+            presentAlert(
+                title: "Shortcut unavailable",
+                message: "TriCap could not claim \(desired.displayString). Use the menu-bar item, or pick a different shortcut in Settings."
             )
         }
+        refreshMenu()
     }
 
     // MARK: - Menu actions
@@ -166,16 +197,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Capture flow
 
+    /// The single entry point for every capture. The hot key and both menu items call this.
+    ///
+    /// The gate is held for the *entire* pipeline and released in one place, after the recording
+    /// has been fully torn down. `recordClip` therefore awaits `RecordingSession.run()` rather
+    /// than returning as soon as the HUD is on screen — which is what previously let a second
+    /// trigger overwrite the live recorder, HUD, stop target and cancel key.
     private func beginCapture(mode: RegionSelector.CaptureMode) {
-        guard !isCapturing else { return }
-        isCapturing = true
+        guard gate.tryBegin() else { return }
 
         Task { @MainActor in
             defer {
-                isCapturing = false
-                // Settings can change the hot key label; keep the menu honest.
-                refreshMenu()
-                syncHotKeyRegistration()
+                gate.end()
+                recordingSession = nil
+                selector = nil
             }
 
             guard await ensurePermission() else { return }
@@ -189,6 +224,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             case .cancelled:
                 TriCapLog.app.info("capture cancelled at selection")
             case .selected(let region, .still):
+                gate.transition(to: .capturingStill)
                 await captureStill(region: region)
             case .selected(let region, .recording):
                 await recordClip(region: region)
@@ -212,76 +248,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func recordClip(region: CaptureRegion) async {
         let limits = store.settings.recordingLimits
-        let countdown = store.settings.countdownSeconds
+        let chrome = RecordingChromeController()
 
-        guard await hud.runCountdown(seconds: countdown, over: region) else {
-            hud.dismiss()
+        gate.transition(to: .countdown)
+        guard await chrome.runCountdown(seconds: store.settings.countdownSeconds, over: region) else {
+            chrome.dismiss()
             TriCapLog.app.info("recording cancelled during countdown")
             return
         }
 
-        let recorder = RegionRecorder(region: region, limits: limits)
-        self.recorder = recorder
+        let session = RecordingSession(
+            backend: RegionRecorder(region: region, limits: limits),
+            chrome: chrome,
+            region: region,
+            limits: limits
+        )
+        recordingSession = session
+        gate.transition(to: .recording)
 
-        var stopped = false
-        let stop: @MainActor () -> Void = { [weak self] in
-            guard !stopped else { return }
-            stopped = true
-            Task { @MainActor in await self?.finishRecording() }
+        // Returns only once the recorder and the chrome are fully torn down.
+        let outcome = await session.run()
+        gate.transition(to: .finishing)
+        recordingSession = nil
+
+        if session.ignoredStopRequests > 0 {
+            TriCapLog.app.info(
+                "ignored \(session.ignoredStopRequests, privacy: .public) duplicate stop/cancel request(s)"
+            )
         }
 
-        recorder.onProgress = { [weak self] progress in
-            self?.hud.update(progress: progress, limits: limits)
-        }
-        recorder.onAutoStop = { reason in
-            TriCapLog.app.info("recording auto-stopped: \(reason.rawValue, privacy: .public)")
-            stop()
-        }
-
-        do {
-            try await recorder.start()
-        } catch {
-            self.recorder = nil
-            hud.dismiss()
-            presentCaptureError(error)
-            return
-        }
-
-        hud.showRecordingHUD(region: region, onStop: stop)
-        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.keyCode == 53 else { return event }
-            Task { @MainActor in await self?.cancelRecording() }
-            return nil
-        }
-    }
-
-    private var escapeMonitor: Any?
-
-    private func teardownRecordingChrome() {
-        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
-        escapeMonitor = nil
-        hud.dismiss()
-    }
-
-    private func finishRecording() async {
-        guard let recorder else { return }
-        self.recorder = nil
-        teardownRecordingChrome()
-
-        do {
-            let clip = try await recorder.finish()
+        switch outcome {
+        case .finished(let clip):
             presentEditor(source: .clip(clip))
-        } catch {
+        case .cancelled:
+            TriCapLog.app.info("recording cancelled by user")
+        case .failed(let error):
             presentCaptureError(error)
         }
-    }
-
-    private func cancelRecording() async {
-        guard let recorder else { return }
-        self.recorder = nil
-        teardownRecordingChrome()
-        await recorder.cancel()
-        TriCapLog.app.info("recording cancelled by user")
     }
 
     // MARK: - Permission
@@ -329,46 +332,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Editor
 
     private func presentEditor(source: EditorSource) {
-        var window: NSWindow?
-
-        let model = EditorModel(
+        editorPresenter.present(
             source: source,
             settings: store.settings,
-            onExported: { [weak self] result in
-                self?.handleExport(result)
-            },
-            onClosed: {
-                window?.close()
-            }
-        )
-
-        let hosting = NSHostingController(rootView: EditorView(model: model))
-        let created = NSWindow(contentViewController: hosting)
-        created.title = source.isClip ? "TriCap — Recording" : "TriCap — Screenshot"
-        created.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        created.isReleasedWhenClosed = false
-        created.setContentSize(preferredEditorSize(for: model.canvasSize))
-        created.center()
-        created.delegate = self
-        window = created
-        editorWindows[ObjectIdentifier(created)] = created
-
-        NSApp.activate(ignoringOtherApps: true)
-        created.makeKeyAndOrderFront(nil)
-    }
-
-    /// Fit the canvas on screen without shrinking below a usable toolbar width.
-    private func preferredEditorSize(for canvas: CGSize) -> CGSize {
-        let visible = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
-        let chrome = CGSize(width: 0, height: 190)
-        let maxCanvas = CGSize(
-            width: max(480, visible.width * 0.8),
-            height: max(320, visible.height * 0.8 - chrome.height)
-        )
-        let scale = min(1, min(maxCanvas.width / max(1, canvas.width), maxCanvas.height / max(1, canvas.height)))
-        return CGSize(
-            width: max(680, canvas.width * scale),
-            height: max(460, canvas.height * scale + chrome.height)
+            windowDelegate: self,
+            onExported: { [weak self] result in self?.handleExport(result) }
         )
     }
 
@@ -437,12 +405,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// Re-register the hot key when the user changed it in settings.
-    private func syncHotKeyRegistration() {
-        let desired = store.settings.hotKey
-        guard GlobalHotKeyMonitor.shared.registeredCombo != desired else { return }
-        registerHotKey()
-    }
 }
 
 extension AppDelegate: NSWindowDelegate {
@@ -451,8 +413,8 @@ extension AppDelegate: NSWindowDelegate {
         if window === settingsWindow {
             settingsWindow = nil
             refreshMenu()
-            syncHotKeyRegistration()
+            return
         }
-        editorWindows.removeValue(forKey: ObjectIdentifier(window))
+        editorPresenter.release(window)
     }
 }

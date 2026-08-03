@@ -41,7 +41,7 @@ CaptureCore  SelectionUI  AnnotationCore  →  ExportCore
 |---|---|
 | `CWebP` | Vendored libwebp: dec, demux, dsp, enc, mux, utils, sharpyuv. One hand-written module map exposing only the public headers TriCap uses. |
 | `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging. |
-| `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, clip trimming and WebP timeline construction. |
+| `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, the `RecordingSession` lifecycle and its `CaptureSessionGate`, clip trimming and WebP timeline construction. |
 | `SelectionUI` | The cross-display selection overlay: one borderless shielding-level window per screen, one shared global selection rect, `R`/`S` mode switching, `Esc`/right-click cancel. |
 | `AnnotationCore` | Annotation model (`AnnotationItem`, `AnnotationShape`, `AnnotationStyle`), the snapshot-based `AnnotationDocument` with bounded undo/redo, and `AnnotationRenderer`. |
 | `ExportCore` | `WebPCodec` (the libwebp bridge), `StillImageCodec` + `MagicBytes`, `OutputFileWriter`, `MarkdownReference`, and `ExportService` which renders → encodes → writes → **re-reads and verifies**. |
@@ -64,6 +64,63 @@ TriCapApp). All five exist. Two additions:
    Putting it beside the geometry types is what lets every coordinate test run headless.
 
 `CWebP` is a sixth target purely because SwiftPM needs C and Swift in separate targets.
+
+## Capture session lifecycle
+
+Exactly one capture may be in flight, and "in flight" spans the whole pipeline: selection,
+countdown, recording, teardown and the hand-off to the editor.
+
+`CaptureSessionGate` is the single occupancy flag. Every entry point — the global hot key and both
+menu items — calls `tryBegin()`, and the gate is released in one `defer` at the end of the whole
+`Task`. A refused entry is counted and logged rather than silently dropped.
+
+`RecordingSession` owns one recording and holds the invariant that makes the gate meaningful:
+**`run()` does not return until the backend is torn down and the chrome is dismissed.** An earlier
+version released its "busy" flag as soon as the HUD appeared, so a second hot-key press could
+begin a new session on top of a live one, overwriting the recorder, the stop target and the cancel
+key. Stop and cancel are latched: the first request wins, later ones are counted and ignored, so a
+double-click on Stop, or Stop racing an automatic duration stop, is harmless.
+
+Both the backend (`RecordingBackend`) and the on-screen furniture (`RecordingChrome`) are
+protocols, so the lifecycle rules are unit-tested with fakes — no ScreenCaptureKit, no window
+server. `RegionRecorder` and `RecordingChromeController` are the production implementations.
+
+## Recording duration and the static-screen problem
+
+ScreenCaptureKit only delivers a `.complete` frame when the picture actually changed. A duration
+ceiling checked when a frame arrives therefore never fires on a still screen: a "15 second
+maximum" recording of a motionless window would run until the user noticed. So:
+
+- `RegionRecorder` runs a 10 Hz tick on the main run loop that measures elapsed time with
+  `ContinuousClock` (monotonic — an NTP correction cannot move the ceiling) and stops the
+  recording itself. The stop is latched, so it is reported exactly once and the tick timer is
+  invalidated.
+- The clip records `wallClockDuration`, measured from the first *retained* frame to the moment
+  capture stopped. `RecordedClip.duration` returns that, floored at "last frame + one nominal
+  interval" so a recording stopped microseconds after a frame does not end on a flash.
+- `ClipTiming.timeline(for:nominalFrameInterval:totalDuration:)` extends the final frame to the
+  measured end, so one second of motion followed by fourteen static seconds exports as a fifteen
+  second animation whose last frame holds for fourteen seconds.
+- `ClipTrimmer.trimmedDuration(frames:range:clipDuration:)` defines what trimming means: keeping
+  the tail keeps the recording's real end; trimming the tail off ends the clip when the first
+  dropped frame would have replaced the last kept one.
+
+## Cancelling a recording from another application
+
+The cancel key has to work when the user has clicked into the app they are recording, which a
+`NSEvent.addLocalMonitorForEvents` monitor cannot do — it only sees keys delivered to TriCap. A
+*global* `NSEvent` monitor would need Accessibility permission, a second TCC prompt TriCap refuses
+to ask for.
+
+Carbon's `RegisterEventHotKey` accepts a modifier-less key code and needs no permission at all.
+Verified on this machine: `RegisterEventHotKey(kVK_Escape, 0, …)` returns `noErr` with
+`AXIsProcessTrusted() == false`. `GlobalHotKeyMonitor` therefore keeps independent *slots* — the
+user's configurable capture shortcut and a transient recording-cancel key — and
+`RecordingChromeController` claims a bare Escape for the lifetime of the recording only.
+
+The trade is explicit: while a recording runs (at most `RecordingLimits.maxDuration`), Escape is
+intercepted system-wide. If another application already owns a bare Escape hot key, the HUD says
+so instead of pretending Escape is wired up.
 
 ## Coordinate model
 
@@ -163,18 +220,46 @@ writes a still WebP; that is detected, kept, and reported as `collapsedToSingleF
 
 ## Writing files
 
-`OutputFileWriter` writes to a temp file in the destination directory, then claims the final name
-with `link(2)`, which fails atomically with `EEXIST`. A `fileExists` check followed by a write
-would have a race window; two TriCap exports in the same second cannot clobber each other. Names
-go `base.ext`, `base-1.ext`, … up to 1000, then one random-token fallback.
+`OutputFileWriter` writes to a temp file in the destination directory, then *atomically claims*
+the final name. A `fileExists` check followed by a write would have a race window; two TriCap
+exports in the same second cannot clobber each other. Names go `base.ext`, `base-1.ext`, … up to
+1000, then one random-token fallback.
+
+Three claim mechanisms, tried in order, because not every filesystem implements the strong ones:
+
+| Strategy | Call | Where it works |
+|---|---|---|
+| `hardLink` | `link(2)` | APFS, HFS+. Best: the final name never exists in a partial state, because the bytes are already complete in the temp file. |
+| `exclusiveRename` | `renamex_np(…, RENAME_EXCL)` | APFS, HFS+. Atomic create-or-fail. |
+| `exclusiveCreate` | `open(O_CREAT\|O_EXCL)` then write | Everywhere, including exFAT and SMB. Claims the name atomically but writes the bytes afterwards, so an abrupt power loss mid-write can leave a short file. Last resort. |
+
+`link(2)` returns `EPERM` on exFAT/FAT and `ENOTSUP` on many network mounts; treating that as a
+hard failure meant a save folder on a USB stick or a NAS could not be written to at all. Those
+errno values now fall through to the next strategy, while a real error still propagates.
+
+## Editor window ownership
+
+`EditorPresenter` is the sole owner of open editor windows. The editor's *Close* button needs to
+reach its own window, and capturing it strongly in the model's `onClosed` closure forms
+`window → contentViewController → EditorView → model → closure → window` — a cycle that keeps the
+window, the model and every retained recording frame alive forever (tens of megabytes per leaked
+editor). The closure captures a box that holds the window **weakly** instead. `--selftest` proves
+it: it builds a real clip editor, closes it, and asserts that weak references to the window and
+the model are both nil.
 
 ## Hot key
 
 `RegisterEventHotKey` (Carbon) rather than an `NSEvent` global monitor: a global monitor needs
 Accessibility permission — a second, scarier TCC prompt on top of Screen Recording — and cannot
 stop the key reaching the focused app. Carbon's hot-key API remains the only public way to claim a
-system-wide combination without that permission. A combination with no modifiers is refused
-outright; a combination another app already owns is reported instead of silently going dead.
+system-wide combination without that permission. A modifier-less combination is refused for the
+*configurable* shortcut (it would swallow ordinary typing); only the transient recording-cancel
+slot opts in via `allowingNoModifiers`.
+
+Claiming a new combination requires releasing the old one first, so a rejected new shortcut used
+to leave TriCap with no working shortcut at all. `HotKeyRegistrationPolicy` (a pure function, so
+the behaviour is testable without Carbon) now rolls back to the previous combination, the app
+reverts the stored setting to match, and the user is told which shortcut is actually live.
 
 ## Selection overlay
 

@@ -219,11 +219,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
         // a preset — which would rewrite whatever quality the user had been getting — the stored
         // values decide: they map to a preset only if they match one exactly, and otherwise the
         // settings load as `.custom` with every number preserved.
-        // An unrecognised value — a preset renamed since the blob was written, or one from a
-        // newer build — falls back to `.custom`, which keeps every stored number. Decoding it
-        // strictly would throw, and the caller's `try?` would then discard the *entire* settings
-        // blob over one unknown string.
-        qualityPreset = c.decodeTolerantly(QualityPreset.self, forKey: .qualityPreset) ?? .custom
+        // The raw value is read as a plain `String` so a preset renamed since the blob was
+        // written can be mapped forward (see `QualityPreset.renamedRawValues`). A value from a
+        // *newer* build is still unknown and falls back to `.custom`, which keeps every stored
+        // number. Decoding the enum strictly would throw, and the caller's `try?` would then
+        // discard the entire settings blob over one unrecognised string.
+        let storedPresetRawValue = try? c.decodeIfPresent(String.self, forKey: .qualityPreset)
+        qualityPreset = storedPresetRawValue.flatMap(QualityPreset.fromPersistedRawValue) ?? .custom
         countdownSeconds = (try c.decodeIfPresent(Int.self, forKey: .countdownSeconds) ?? fallback.countdownSeconds).clamped(to: Self.countdownRange)
         copyReferenceAfterExport = try c.decodeIfPresent(Bool.self, forKey: .copyReferenceAfterExport) ?? fallback.copyReferenceAfterExport
         copyImageAfterExport = try c.decodeIfPresent(Bool.self, forKey: .copyImageAfterExport) ?? fallback.copyImageAfterExport

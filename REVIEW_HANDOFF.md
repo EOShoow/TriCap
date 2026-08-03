@@ -72,7 +72,7 @@ a new read-only accessor.
 | Smaller file | 65 | 960 | 10 | 60 |
 | **Balanced** (default) | 85 | 1440 | 12 | 80 |
 | Sharper | 95 | 1920 | 15 | 90 |
-| Maximum | 100 | 3840 | 20 | 95 |
+| Up to 4K | 100 | 3840 | 20 | 95 |
 
 Three invariants, each with a test:
 
@@ -606,7 +606,7 @@ render of the real view** (§3.7), not by a desktop screenshot. What that leaves
 | Export toast | That the panel positions correctly under the menu bar, auto-dismisses after 6 s, and that **Show in Finder** reveals the file | Save a capture and watch the top-right corner |
 | Tool shortcuts | That `⌘1`–`⌘5` actually switch tools in a focused editor window | Open the editor and press them |
 | Overlay banner | That the banner stays legible over real desktop content on a Retina display, and that it does not obscure content at the top of the screen | Press `⌥⇧5` and drag near the top edge |
-| Quality presets end to end | That picking a preset visibly changes a *real* capture's file size. The mapping to encoder arguments is asserted, and the encoders' response to quality is asserted, but the two were not chained through a live capture. | Save the same region at *Smaller file* and at *Maximum*, compare sizes |
+| Quality presets end to end | That picking a preset visibly changes a *real* capture's file size. The mapping to encoder arguments is asserted, and the encoders' response to quality is asserted, but the two were not chained through a live capture. | Save the same region at *Smaller file* and at *Up to 4K*, compare sizes |
 | Countdown panel | That it appears centred on the selection and that `Esc` cancels during it | Set a 3 s countdown and start a recording |
 
 **The preset numbers are a judgement call.** They were chosen to span TriCap's existing ranges

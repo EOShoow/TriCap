@@ -230,6 +230,47 @@ struct SettingsMigrationTests {
         #expect(decoded.qualityPreset == .sharper)
     }
 
+    @Test("A preset renamed since the blob was written keeps its label")
+    func renamedPresetMigrates() throws {
+        // The build before the rename persisted `.maximum` as "maximum". Tolerant decoding alone
+        // would have degraded that to Custom: the numbers survive, but the user's explicit preset
+        // choice is silently forgotten.
+        let settings = try decode(
+            #"{"qualityPreset": "maximum", "stillQuality": 100, "filenamePrefix": "Shot", "markdownVaultRootPath": "/tmp/vault", "recordingLimits": {"frameRate": 20, "maxDuration": 15, "maxLongEdgePixels": 3840, "maxFrameBufferBytes": 536870912}, "animatedWebPOptions": {"quality": 95, "loopCount": 0, "lossless": false, "method": 4}}"#
+        )
+
+        #expect(settings.qualityPreset == .highDetail)
+        // Every other field, and every number, survives the migration untouched.
+        #expect(settings.stillQuality == 100)
+        #expect(settings.recordingLimits.frameRate == 20)
+        #expect(settings.recordingLimits.maxLongEdgePixels == 3840)
+        #expect(settings.animatedWebPOptions.quality == 95)
+        #expect(settings.filenamePrefix == "Shot")
+        #expect(settings.markdownVaultRootPath == "/tmp/vault")
+        // The migrated label agrees with the values it names.
+        #expect(settings.reconciledForQualityPreset().qualityPreset == .highDetail)
+    }
+
+    @Test("The rename table resolves the old name and leaves the new one alone")
+    func renameTableIsConsistent() {
+        #expect(QualityPreset.fromPersistedRawValue("maximum") == .highDetail)
+        #expect(QualityPreset.fromPersistedRawValue("highDetail") == .highDetail)
+        #expect(QualityPreset.fromPersistedRawValue("someFuturePreset") == nil)
+
+        // Every alias must point at a case that still exists, and must not shadow a live raw value.
+        for (alias, target) in QualityPreset.renamedRawValues {
+            #expect(QualityPreset.allCases.contains(target))
+            #expect(QualityPreset(rawValue: alias) == nil, "\(alias) is still a live raw value")
+        }
+    }
+
+    @Test("Every current preset still round-trips through its own raw value")
+    func currentPresetsRoundTrip() {
+        for preset in QualityPreset.allCases {
+            #expect(QualityPreset.fromPersistedRawValue(preset.rawValue) == preset)
+        }
+    }
+
     @Test("An unknown quality preset falls back to Custom without discarding anything else")
     func unknownPresetDoesNotDestroySettings() throws {
         // A preset renamed since the blob was written, or one from a newer build. Strict decoding

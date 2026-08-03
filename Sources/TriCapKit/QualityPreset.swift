@@ -108,6 +108,24 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
         }
     }
 
+    /// Raw values written by earlier builds, mapped to the case that replaced them.
+    ///
+    /// A rename changes the string a preset persists as. Without this table an upgrading user's
+    /// stored `"maximum"` would decode as ``custom``: their numbers would survive, but the label
+    /// naming them would not, and the settings window would show *Custom* for values they had
+    /// explicitly picked a preset for.
+    ///
+    /// Only *known* historical names belong here. A raw value from a newer build is still
+    /// unknown, and still degrades to ``custom``.
+    public static let renamedRawValues: [String: QualityPreset] = [
+        "maximum": .highDetail,
+    ]
+
+    /// Resolve a stored raw value, honouring renames. `nil` when the value is genuinely unknown.
+    public static func fromPersistedRawValue(_ rawValue: String) -> QualityPreset? {
+        QualityPreset(rawValue: rawValue) ?? renamedRawValues[rawValue]
+    }
+
     /// Which preset (if any) a set of values corresponds to.
     ///
     /// Used both when the user edits an advanced field — to decide whether they have left the

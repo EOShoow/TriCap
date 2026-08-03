@@ -138,7 +138,7 @@ so instead of pretending Escape is wired up.
 ## Quality presets
 
 `QualityPreset` (in `TriCapKit`) names an outcome — *Smaller file*, *Balanced*, *Sharper*,
-*Maximum* — and stands for four concrete encoder arguments: the still quality factor, the
+*Up to 4K* — and stands for four concrete encoder arguments: the still quality factor, the
 recording long-edge cap, the recording frame rate, and the animation quality factor. Those four
 are exactly the values that reach `StillImageCodec.encode(quality:)`, `SCStreamConfiguration` and
 `WebPConfig`, which is what the tests assert.

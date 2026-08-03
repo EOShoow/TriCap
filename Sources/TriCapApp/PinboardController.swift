@@ -12,6 +12,8 @@ import TriCapKit
 final class PinboardController: PinWindowDelegate {
 
     private var pins: [PinWindow] = []
+    /// TriCap's own front-to-back order. `NSApp.windows` is not it — see ``PinFocusOrder``.
+    private var focus = PinFocusOrder<UInt64>()
     private let limits: PinLimits
     private var settingsProvider: () -> AppSettings
 
@@ -91,6 +93,7 @@ final class PinboardController: PinWindowDelegate {
 
         let pin = PinWindow(image: image, frame: frame, delegate: self)
         pins.append(pin)
+        focus.insert(pin.pinID)   // a new pin is the frontmost one
         // `orderFrontRegardless` rather than `makeKeyAndOrderFront`: showing a pin must not pull
         // focus away from whatever the user is typing in.
         pin.orderFrontRegardless()
@@ -109,21 +112,31 @@ final class PinboardController: PinWindowDelegate {
     func close(_ pin: PinWindow) {
         guard let index = pins.firstIndex(where: { $0 === pin }) else { return }
         pins.remove(at: index)
+        focus.remove(pin.pinID)
         pin.tearDown()
         releaseEscapeIfIdle()
         onCountChanged?()
     }
 
-    /// Close the most recently interacted-with pin — what Escape means when several are open.
+    /// Close the most recently created or interacted-with pin — what Escape means when several are
+    /// open. The order comes from ``PinFocusOrder``, not from `NSApp.windows`.
     func closeFrontmost() {
-        guard let frontmost = pins.max(by: { $0.orderedIndex > $1.orderedIndex }) else { return }
-        close(frontmost)
+        guard let id = focus.frontmost, let pin = pins.first(where: { $0.pinID == id }) else {
+            // The order and the window list disagree — close something rather than nothing.
+            if let fallback = pins.last { close(fallback) }
+            return
+        }
+        close(pin)
     }
+
+    /// The pin Escape would close. Exposed for the runnable self-test.
+    var frontmostPinID: UInt64? { focus.frontmost }
 
     func closeAll() {
         guard !pins.isEmpty else { return }
         let existing = pins
         pins.removeAll()
+        focus.removeAll()
         for pin in existing { pin.tearDown() }
         releaseEscapeIfIdle()
         onCountChanged?()
@@ -134,6 +147,7 @@ final class PinboardController: PinWindowDelegate {
 
     func pinDidRequestClose(_ pin: PinWindow) { close(pin) }
     func pinDidRequestCloseAll() { closeAll() }
+    func pinDidInteract(_ pin: PinWindow) { focus.touch(pin.pinID) }
 
     func pinDidRequestCopy(_ pin: PinWindow) {
         guard let image = pin.image else { return }
@@ -167,19 +181,14 @@ final class PinboardController: PinWindowDelegate {
 
     private func claimEscapeIfNeeded() {
         guard !pins.isEmpty, escapeToken == nil else { return }
-        escapeToken = SharedEscapeKey.claim.push { [weak self] in self?.closeFrontmost() }
+        escapeToken = SharedEscapeKey.claim.push(priority: .pin) { [weak self] in
+            self?.closeFrontmost()
+        }
     }
 
     private func releaseEscapeIfIdle() {
         guard pins.isEmpty else { return }
         SharedEscapeKey.claim.pop(escapeToken)
         escapeToken = nil
-    }
-}
-
-private extension NSWindow {
-    /// Front-to-back position; larger is more recently ordered front.
-    var orderedIndex: Int {
-        NSApp.windows.firstIndex(of: self).map { -$0 } ?? 0
     }
 }

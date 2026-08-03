@@ -29,6 +29,11 @@ final class PinWindow: NSPanel {
     /// balances while a pin is being torn down.
     let pixelCount: Int
 
+    /// Stable identity for `PinFocusOrder`. Deliberately not the window number: TriCap tracks its
+    /// own front-to-back order rather than trusting `NSApp.windows`.
+    let pinID: UInt64
+    private static var nextPinID: UInt64 = 1
+
     private let imageView = NSImageView()
     private var dragOffset: CGPoint?
     private weak var pinDelegate: (any PinWindowDelegate)?
@@ -41,6 +46,8 @@ final class PinWindow: NSPanel {
         self.image = image
         self.imagePixelSize = CGSize(width: image.width, height: image.height)
         self.pixelCount = image.width * image.height
+        self.pinID = Self.nextPinID
+        Self.nextPinID += 1
         self.pinDelegate = delegate
 
         super.init(
@@ -73,6 +80,13 @@ final class PinWindow: NSPanel {
         content.addSubview(imageView)
 
         contentView = content
+    }
+
+    /// Called by the content view on every user interaction: tell the controller, and come forward
+    /// so what the user sees matches what Escape will close.
+    fileprivate func noteInteraction() {
+        pinDelegate?.pinDidInteract(self)
+        orderFrontRegardless()
     }
 
     // MARK: - Teardown
@@ -209,6 +223,10 @@ protocol PinWindowDelegate: AnyObject {
     func pinDidRequestCloseAll()
     func pinDidRequestCopy(_ pin: PinWindow)
     func pinDidRequestSave(_ pin: PinWindow)
+    /// The user touched this pin — clicked, dragged, scrolled, pinched or right-clicked it. The
+    /// controller uses this to keep its own front-to-back order, since a non-activating panel
+    /// generates no key/main-window notifications to infer it from.
+    func pinDidInteract(_ pin: PinWindow)
 }
 
 /// The pin's content view: drags, scroll/pinch zoom, and the context menu.
@@ -224,6 +242,7 @@ private final class PinContentView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        owner?.noteInteraction()
         owner?.beginDrag(at: screenPoint(for: event))
     }
 
@@ -237,6 +256,7 @@ private final class PinContentView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         guard let owner else { return }
+        owner.noteInteraction()
         // A trackpad reports fractional precise deltas; a mouse wheel reports whole lines. Both
         // end up as a small multiplicative step so the feel is comparable.
         let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 300.0 : event.scrollingDeltaY / 20.0
@@ -246,11 +266,13 @@ private final class PinContentView: NSView {
 
     override func magnify(with event: NSEvent) {
         guard let owner else { return }
+        owner.noteInteraction()
         owner.zoom(by: 1 + event.magnification, anchor: screenPoint(for: event))
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        owner?.makeContextMenu()
+        owner?.noteInteraction()
+        return owner?.makeContextMenu()
     }
 
     override func resetCursorRects() {

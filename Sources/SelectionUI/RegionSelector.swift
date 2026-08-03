@@ -47,9 +47,17 @@ public final class RegionSelector {
     ///
     /// Polling the window server on every mouse-move would be far too slow; a list taken at open
     /// time is also what the user sees, because the overlay covers everything anyway.
+    ///
+    /// Already filtered by `WindowPicker.isSelectable` — see ``snapEdges``.
     private var candidates: [WindowCandidate] = []
     private var highlighted: WindowCandidate?
-    /// Edges the drag snaps to: every candidate window plus every display.
+    /// Edges the drag snaps to: the **same** filtered windows as ``candidates``, plus every
+    /// display.
+    ///
+    /// These two must come from one filtered list. Building the snap set from the raw candidates
+    /// meant the desktop, Notification Centre widgets and the Dock's wallpaper window contributed
+    /// snap lines even though none of them could be hovered or clicked — full-screen edges that
+    /// masquerade as screen edges and drag a selection somewhere the user did not aim.
     private var snapEdges: [CGRect] = []
     private var continuation: CheckedContinuation<Outcome, Never>?
     private var previouslyActiveApp: NSRunningApplication?
@@ -68,8 +76,17 @@ public final class RegionSelector {
         guard !displays.isEmpty else { return .cancelled }
         self.displays = displays
         self.mode = initialMode
-        self.candidates = windowCandidates
-        self.snapEdges = windowCandidates.map(\.frame) + displays.map(\.appKitBounds)
+        // One filtered list feeds both hit-testing and snapping, so they can never disagree about
+        // what counts as a window.
+        let ownBundle = Bundle.main.bundleIdentifier
+        self.candidates = WindowPicker.selectableWindows(
+            in: windowCandidates, ownBundleIdentifier: ownBundle
+        )
+        self.snapEdges = WindowPicker.snapEdges(
+            in: windowCandidates,
+            displayBounds: displays.map(\.appKitBounds),
+            ownBundleIdentifier: ownBundle
+        )
 
         // Remember who was in front so a cancelled capture puts focus back where it was.
         previouslyActiveApp = NSWorkspace.shared.frontmostApplication

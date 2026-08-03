@@ -105,7 +105,11 @@ final class RecordingChromeController: RecordingChrome {
     /// time, so swapping it does not need a new registration.
     private func claimEscape() -> Bool {
         if escapeToken != nil { return true }
-        escapeToken = SharedEscapeKey.claim.push { [weak self] in self?.escapeHandler?() }
+        // `.recording` outranks `.pin`, so a pin created *during* a recording cannot take Escape
+        // away from cancellation — and gets it back automatically when the recording ends.
+        escapeToken = SharedEscapeKey.claim.push(priority: .recording) { [weak self] in
+            self?.escapeHandler?()
+        }
         return escapeToken != nil
     }
 

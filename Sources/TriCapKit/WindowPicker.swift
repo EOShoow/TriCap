@@ -47,16 +47,27 @@ public enum WindowPicker {
     /// capture target produces an empty screenshot.
     public static let minimumUsefulEdge: CGFloat = 8
 
-    /// Whether a candidate may ever be offered.
+    /// `CGWindowLevel` of ordinary application windows — the only layer a user means by
+    /// "that window".
+    public static let ordinaryApplicationLayer = 0
+
+    /// Whether a candidate may ever be offered, for highlighting **or** for edge snapping.
     ///
     /// - Excludes TriCap itself, so the selection overlay and the recording HUD are never targets.
     /// - Excludes off-screen, hidden and minimised windows, which have stale frames.
-    /// - Excludes anything above the ordinary application layer: the menu bar, the Dock, status
-    ///   items, screen-saver and security windows all live there, and none of them is a thing a
-    ///   user means by "that window".
+    /// - Excludes every layer except ``ordinaryApplicationLayer``.
+    ///
+    /// The level test is an equality check on purpose. Above zero are the menu bar, the Dock,
+    /// status items, screen-saver and security windows. *Below* zero is the system's desktop
+    /// furniture, and a `SCShareableContent` probe on this machine listed Notification Centre
+    /// widgets, `underbelly`, the Finder desktop, the Dock's wallpaper window and "Display
+    /// Backstop" there. Those are full-screen or near-full-screen, so allowing them made the
+    /// desktop itself a hover target and littered the snap set with edges that look like screen
+    /// edges but are not. Nothing in the public API promises what lives at a negative layer, so
+    /// TriCap does not guess: only layer 0 participates.
     public static func isSelectable(_ window: WindowCandidate, ownBundleIdentifier: String?) -> Bool {
         guard window.isOnScreen else { return false }
-        guard window.level <= 0 else { return false }
+        guard window.level == ordinaryApplicationLayer else { return false }
         guard window.frame.width >= minimumUsefulEdge, window.frame.height >= minimumUsefulEdge else {
             return false
         }
@@ -87,6 +98,20 @@ public enum WindowPicker {
         candidates
             .filter { isSelectable($0, ownBundleIdentifier: ownBundleIdentifier) }
             .sorted { $0.stackingIndex < $1.stackingIndex }
+    }
+
+    /// The rectangles a drag may snap to: the selectable windows, plus the displays.
+    ///
+    /// Deliberately derived from the same ``isSelectable`` rule as highlighting. Anything a user
+    /// cannot click must not silently tug their selection either, and display bounds are always
+    /// included because the screen edge is a legitimate target regardless of what is on it.
+    public static func snapEdges(
+        in candidates: [WindowCandidate],
+        displayBounds: [CGRect],
+        ownBundleIdentifier: String? = nil
+    ) -> [CGRect] {
+        selectableWindows(in: candidates, ownBundleIdentifier: ownBundleIdentifier).map(\.frame)
+            + displayBounds
     }
 }
 

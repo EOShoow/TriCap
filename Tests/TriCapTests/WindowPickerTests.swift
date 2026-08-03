@@ -65,10 +65,36 @@ struct WindowPickerTests {
         #expect(WindowPicker.window(at: CGPoint(x: 10, y: 10), in: [systemWindow]) == nil)
     }
 
-    @Test("Desktop-level windows below the application layer stay selectable")
-    func allowsNegativeLevels() {
-        let desktop = window(1, CGRect(x: 0, y: 0, width: 400, height: 400), level: -2147483603)
-        #expect(WindowPicker.window(at: CGPoint(x: 10, y: 10), in: [desktop])?.id == 1)
+    @Test("Windows below the application layer are excluded too", arguments: [
+        -1,             // just below
+        -2147483603,    // the Finder desktop / Dock wallpaper window
+        -2147483628,    // "Display Backstop"
+        -25,
+    ])
+    func excludesBelowApplicationLayer(level: Int) {
+        // A live `SCShareableContent` probe on this machine listed Notification Centre widgets,
+        // `underbelly`, the Finder desktop, the Dock's wallpaper window and "Display Backstop" at
+        // negative layers. They are full-screen or nearly so, which made the desktop itself a
+        // hover target. Nothing public says what lives down there, so only layer 0 qualifies.
+        let furniture = window(1, CGRect(x: 0, y: 0, width: 2000, height: 1200), level: level)
+        #expect(WindowPicker.window(at: CGPoint(x: 10, y: 10), in: [furniture]) == nil)
+        #expect(!WindowPicker.isSelectable(furniture, ownBundleIdentifier: nil))
+    }
+
+    @Test("Only the ordinary application layer is selectable")
+    func onlyLayerZero() {
+        let ordinary = window(1, CGRect(x: 0, y: 0, width: 400, height: 400), level: 0)
+        #expect(WindowPicker.isSelectable(ordinary, ownBundleIdentifier: nil))
+        #expect(WindowPicker.ordinaryApplicationLayer == 0)
+    }
+
+    @Test("System furniture does not shadow a real window underneath the pointer")
+    func desktopDoesNotWinOverARealWindow() {
+        // The desktop is frontmost in stacking terms for this test on purpose: even so, the real
+        // window must be the answer.
+        let desktop = window(1, CGRect(x: 0, y: 0, width: 2000, height: 1200), level: -2147483603, stacking: 0)
+        let real = window(2, CGRect(x: 100, y: 100, width: 400, height: 300), level: 0, stacking: 5)
+        #expect(WindowPicker.window(at: CGPoint(x: 200, y: 200), in: [desktop, real])?.id == 2)
     }
 
     @Test("Degenerate and tiny windows are excluded")
@@ -108,6 +134,76 @@ struct WindowPickerTests {
         // `CGRect.contains` is half-open at the far edge, which is the behaviour we want: two
         // abutting windows must not both claim the shared boundary.
         #expect(WindowPicker.window(at: CGPoint(x: 300, y: 300), in: [candidate]) == nil)
+    }
+}
+
+@Suite("Snap edges come from the same filtered list as highlighting")
+struct SnapEdgeSourceTests {
+
+    let display = CGRect(x: 0, y: 0, width: 1440, height: 900)
+
+    /// Every kind of window that must be invisible to *both* hover and snapping.
+    private var excluded: [WindowCandidate] {
+        [
+            window(10, CGRect(x: 0, y: 0, width: 1440, height: 900), level: -2147483603, stacking: 1),
+            window(11, CGRect(x: 200, y: 200, width: 300, height: 300), level: 25, stacking: 2),
+            window(12, CGRect(x: 300, y: 300, width: 300, height: 300), bundle: ownBundle, stacking: 3),
+            window(13, CGRect(x: 400, y: 400, width: 300, height: 300), onScreen: false, stacking: 4),
+            window(14, CGRect(x: 500, y: 500, width: 2, height: 2), stacking: 5),
+        ]
+    }
+
+    @Test("An excluded window contributes no snap edge")
+    func excludedWindowsAreNotSnapTargets() {
+        // The bug: `candidates` was filtered but `snapEdges` was built from the raw list, so the
+        // desktop and the Dock's wallpaper window supplied full-screen snap lines that nothing
+        // could be hovered onto.
+        let edges = WindowPicker.snapEdges(
+            in: excluded, displayBounds: [display], ownBundleIdentifier: ownBundle
+        )
+        #expect(edges == [display], "only the display survives")
+    }
+
+    @Test("Nothing excluded can be hovered either")
+    func excludedWindowsAreNotHoverTargets() {
+        for candidate in excluded {
+            let midpoint = CGPoint(x: candidate.frame.midX, y: candidate.frame.midY)
+            #expect(
+                WindowPicker.window(at: midpoint, in: excluded, ownBundleIdentifier: ownBundle) == nil,
+                "window \(candidate.id) at level \(candidate.level) must not be selectable"
+            )
+        }
+    }
+
+    @Test("A real window contributes a snap edge, and so does the display")
+    func realWindowsSnap() {
+        let real = window(1, CGRect(x: 100, y: 100, width: 400, height: 300))
+        let edges = WindowPicker.snapEdges(
+            in: excluded + [real], displayBounds: [display], ownBundleIdentifier: ownBundle
+        )
+        #expect(edges.contains(real.frame))
+        #expect(edges.contains(display), "the screen edge is always a legitimate target")
+        #expect(edges.count == 2)
+    }
+
+    @Test("Snapping against a desktop-sized excluded window leaves the drag alone")
+    func desktopDoesNotPullTheSelection() {
+        // A selection dragged near the middle of the screen used to be tugged by the desktop
+        // window's edges, which happen to coincide with the display's.
+        let insideEdge = window(9, CGRect(x: 300, y: 300, width: 500, height: 400), level: -3)
+        let edges = WindowPicker.snapEdges(
+            in: [insideEdge], displayBounds: [display], ownBundleIdentifier: ownBundle
+        )
+        let dragged = CGRect(x: 303, y: 302, width: 200, height: 150)
+        #expect(SnapEngine.snap(rect: dragged, to: edges) == dragged)
+    }
+
+    @Test("With no windows at all, the display is still a snap target")
+    func displayOnly() {
+        let edges = WindowPicker.snapEdges(in: [], displayBounds: [display])
+        #expect(edges == [display])
+        let dragged = CGRect(x: 5, y: 100, width: 200, height: 300)
+        #expect(SnapEngine.snap(rect: dragged, to: edges).minX == 0)
     }
 }
 

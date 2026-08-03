@@ -6,6 +6,12 @@ The working tree is left exactly as verified below.
 **Environment:** macOS 26.5.2 (25F84), Apple silicon, Swift 6.3.3, Command Line Tools 26.5,
 **no `Xcode.app` installed**. One display attached (1920×1080 pt @ 2.0 → 3840×2160 px).
 
+> **Round 6.** Baseline `45e5cf5`. Four fixes from Codex's source review and window-server probe:
+> Escape priority, pin ordering, system-layer windows in hover/snap, and the lost copy
+> confirmation on P3/HDR displays. See [§0.00](#000-round-6--codex-acceptance-fixes). Two of the
+> four are reproduced as runtime evidence in `--selftest`; the interactive gaps from §4.9 are
+> unchanged and still open.
+>
 > **Round 5.** Baseline `6d553b8`. Pinning (`F3`), window-aware selection, clipboard-first
 > screenshots and an original app icon. See [§0.0](#00-round-5--pinning-window-aware-selection-clipboard-first-icon)
 > for the mapping and [§4.9](#49-round-5-specific-gaps) for what could **not** be verified here —
@@ -20,6 +26,63 @@ The working tree is left exactly as verified below.
 > [§4.6](#46-round-2-specific-gaps) for what round 2 could *not* verify on this machine.
 
 ---
+
+## 0.00 Round 6 — Codex acceptance fixes
+
+All four were real. Two of them only reproduced in a scenario the round-5 tests never wrote down,
+which is the interesting part — so the new tests were checked against the *old* code and do fail
+there. Test count 339 → **369**.
+
+| # | Finding | What was actually wrong | Fix |
+|---|---|---|---|
+| 1 | Escape priority depended on push order | `PriorityHotKeyClaim` fired `stack.last`. "Pin, then record" passed; "record, then pin" silently handed Escape to the pin, so a recording could no longer be cancelled from another app — exactly what the system-wide Escape exists for. | An explicit `Priority` value (`.recording` = 1000 > `.pin` = 100). The active handler is the highest priority, most recent within a priority. A lower-priority claim still gets a token and takes over automatically when the higher one releases, so pinning mid-recording neither fails nor has to re-claim. |
+| 2 | `closeFrontmost` closed the oldest pin | Order came from `NSApp.windows.firstIndex`, and `max(by: { $0.orderedIndex > $1.orderedIndex })` therefore always resolved to the earliest window. Clicking a pin did not change the answer at all, because AppKit does not reorder that array. | `PinFocusOrder` in TriCapKit, maintained by TriCap: a new pin goes to the front, `pinDidInteract` (mouse-down, scroll, magnify, right-click) brings a pin forward and orders it front, `remove` falls back to the pin behind. `NSApp.windows` is no longer consulted. |
+| 3 | Desktop furniture was a hover and snap target | `isSelectable` allowed `level <= 0`, and `RegionSelector.snapEdges` was built from the **raw** candidate list rather than the filtered one — so even windows that could not be hovered still contributed snap lines. | `level == WindowPicker.ordinaryApplicationLayer` (exactly 0), and a new `WindowPicker.snapEdges` derived from the same filter. `RegionSelector` builds both `candidates` and `snapEdges` from it; display bounds are still always included. |
+| 4 | P3/HDR copies never confirmed the copy | `copyStillToClipboard` had the colour advisory in the `if` and the confirmation in the `else`, so on a wide-gamut display — the common case — the user saw a colour note and no "Copied". | `ClipboardCopyNotice.success(…)` in ExportCore always leads with `Copied W × H`; `(image only)` and any colour advisory are appended to that same message. |
+
+### Runtime evidence, not just unit tests
+
+`--selftest` gained two sections that exercise findings 1 and 3 against the real system:
+
+```
+== Selectable windows
+  window levels present: -2147483626, -2147483624, -2147483622, -2147483603, -2147483602, 0, 24, 25, 26, 2147483630
+  38 window(s), 9 selectable, 7 below the application layer
+    excluded  level -2147483602  1280×67    underbelly
+    excluded  level -2147483603  1280×800
+    excluded  level -2147483622  1470×956   Fullscreen Backdrop
+    excluded  level -2147483624  1470×956   Wallpaper-C18A1F0E-…
+    excluded  level -2147483624  1280×800   Wallpaper-948D95D8-…
+    excluded  level -2147483626  1470×956   Display 1 Backstop
+  PASS  every selectable window is on the ordinary application layer
+  PASS  nothing below the application layer survives the filter
+  PASS  snap edges are the selectable windows plus the displays  — 11 = 9 window(s) + 2 display(s)
+  PASS  no excluded window contributed a snap edge
+
+== Escape priority
+  PASS  Escape cancels the recording, not the pin created after it  — recording=1, pin=0
+  PASS  the pin gets Escape back when the recording ends  — recording=1, pin=1
+```
+
+That independently reproduces the reported window list on this machine — `underbelly`, the
+wallpaper windows, Fullscreen Backdrop and Display Backstop are all there, and all now excluded.
+
+The pin-ordering section prints the array it no longer trusts, which shows the original defect
+directly:
+
+```
+  NOTE  NSApp.windows order for the two pins: 1,2  (TriCap does not rely on it)
+  PASS  the newest pin is the frontmost one              — frontmost=2, newest=2
+  PASS  interacting with a pin brings it forward          — frontmost=1, touched=1
+  PASS  Escape closes the pin the user last touched       — remaining=1, frontmost=2
+```
+
+`1,2` is creation order even though pin 2 was ordered front last — so the old `firstIndex`-based
+ordering resolved to pin 1, the oldest.
+
+**A second display is attached for this round** (1280×800 at AppKit `(-1280, 156)`, i.e. negative
+coordinates), so the multi-display gap listed in §4.9 is now partly closed: the window survey,
+the level filter and the snap-edge construction all ran against two displays.
 
 ## 0.0 Round 5 — pinning, window-aware selection, clipboard-first, icon
 
@@ -681,11 +744,12 @@ What is **not** verified:
 | Mission Control conflict | The failure branch never ran here, because `F3` was free on this machine. The message and the re-bind path are unreviewed by execution. | Re-enable "Mission Control → F3" in Keyboard settings, relaunch TriCap, look for the error and rebind |
 | Focus is not stolen | The self-test asserts `canBecomeKey == false` and that no pin became key — but nothing typed into another app while a pin appeared. | Start typing in a text editor, press `F3` mid-sentence, confirm the characters still land |
 | Cross-Space / full-screen | `collectionBehavior` is asserted; the actual behaviour when switching Spaces or entering a full-screen app was not observed. | Pin an image, swipe to another Space, enter a full-screen app |
-| Pin interaction | Drag, scroll/pinch zoom, opacity, the context menu and `Esc`-to-close are unit-tested as geometry (`PinZoom`, `PinOpacity`, `PinPlacement`) and wired to real event handlers, but no pointer moved. | Pin an image; drag it, scroll on it, pinch, right-click through every menu item, press `Esc` |
+| Pin interaction | Drag, scroll/pinch zoom, opacity, the context menu and `Esc`-to-close are unit-tested as geometry (`PinZoom`, `PinOpacity`, `PinPlacement`) and wired to real event handlers, but no pointer moved. *(Round 6: the self-test now calls `pinDidInteract` on a real pin and checks the resulting order — but that is the delegate call, not an actual mouse-down. Whether `PinContentView` receives events on a non-activating panel is still unverified here.)* | Pin two images, click the older one, press `Esc`, confirm the one you clicked closed |
 | Multi-pin at scale | Two pins were created; the shipped ceiling of 12 pins / 120 MP was tested only through `PinLimits` arithmetic, not by opening twelve real windows. | Pin a dozen large screenshots and watch memory |
-| Window-aware selection | The picking, gesture and snapping rules are pure functions with 23 tests, and `WindowSurvey` converts real `SCWindow` frames — but no one hovered a window and clicked it. **Only one display is attached here**, so multi-display and mixed-scale-factor selection are untested in practice. | Hover several overlapping windows, click one; repeat with a second display attached |
+| Window-aware selection | The picking, gesture and snapping rules are pure functions, and `WindowSurvey` converts real `SCWindow` frames — but no one hovered a window and clicked it. *(Updated in round 6: two displays are now attached, and the level filter and snap-edge construction were exercised against the real 38-window list on both — but both displays are scale 2.0, so **mixed** scale factors remain untested.)* | Hover several overlapping windows, click one; repeat with displays at different scale factors |
 | Clipboard-first screenshots | That the captured image actually pastes into another app. `PasteboardImage.write` is tested and reports a receipt, and the round-trip through PNG is tested — but nothing was pasted anywhere. | Press `⌥⇧5`, capture, then `⌘V` into Preview, Mail and Slack |
 | Clipboard failure recovery | `presentClipboardFailure` was never triggered; making `NSPasteboard` refuse a write on demand is not something this harness can force. | — (code review only) |
+| Copy confirmation on a wide-gamut display | `ClipboardCopyNotice` is unit-tested for all four combinations, but the toast was not seen on screen after a real P3 capture. Both attached displays report the same colour characteristics, so the advisory branch may not even arise here. | Capture on a P3 display and read the toast — it must say `Copied W × H` first |
 | Icon in Finder | `NSWorkspace.icon(forFile:)` returns TriCap's icon (§3.8), which is what Finder draws — but no one opened a Finder window or a Get Info panel and looked. | `open -R build/release/TriCap.app`, then `⌘I` |
 
 ### 4.8 Round-4-specific gaps

@@ -135,3 +135,52 @@ public enum PasteboardImage {
         return WriteReceipt(types: written)
     }
 }
+
+/// What to tell the user after a successful copy.
+///
+/// A separate value rather than a string built at the call site, because it got this wrong: when
+/// the capture came from a P3 or HDR display the colour advisory *replaced* the confirmation, so
+/// the common path on a modern Mac said something about colour conversion and never said the
+/// screenshot had been copied at all. The user was left unsure whether ⌘V would paste anything.
+///
+/// The rule this type enforces: the message always begins by confirming the copy and its pixel
+/// size. A colour advisory is appended to that same message, never substituted for it.
+public struct ClipboardCopyNotice: Equatable, Sendable {
+    /// The full text shown to the user. Always contains "Copied" and the pixel dimensions.
+    public let message: String
+    /// Styled as a warning when there is something the user should know — but still a success.
+    public let isWarning: Bool
+    public let systemImage: String
+
+    public init(message: String, isWarning: Bool, systemImage: String) {
+        self.message = message
+        self.isWarning = isWarning
+        self.systemImage = systemImage
+    }
+
+    /// Build the notice for a copy that succeeded.
+    ///
+    /// - Parameters:
+    ///   - wroteRasterData: `false` when only the system image object made it onto the pasteboard,
+    ///     which is worth mentioning because a few applications only take `public.png`.
+    ///   - colorNotice: `ColorSpaceOutcome.userFacingNotice`, when the source was wide-gamut or
+    ///     extended-range.
+    public static func success(
+        width: Int,
+        height: Int,
+        wroteRasterData: Bool,
+        colorNotice: String?
+    ) -> ClipboardCopyNotice {
+        var message = "Copied \(width) × \(height)"
+        if !wroteRasterData { message += " (image only)" }
+        guard let colorNotice, !colorNotice.isEmpty else {
+            return ClipboardCopyNotice(
+                message: message, isWarning: false, systemImage: "checkmark.circle.fill"
+            )
+        }
+        // One notice, success first: the colour note explains the copy, it does not replace it.
+        return ClipboardCopyNotice(
+            message: "\(message) · \(colorNotice)", isWarning: true, systemImage: "paintpalette"
+        )
+    }
+}

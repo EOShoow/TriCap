@@ -194,3 +194,57 @@ public enum PinOpacity {
         "\(Int((clamp(value) * 100).rounded()))%"
     }
 }
+
+/// Which pin "the frontmost pin" means, tracked explicitly.
+///
+/// This used to be derived from `NSApp.windows.firstIndex(of:)`, on the assumption that AppKit
+/// reorders that array as windows come forward. It does not: a window-server probe on this machine
+/// showed that after creating A then B, `NSApp.windows == [A, B]`, and ordering A front left the
+/// array unchanged. The old ordering therefore resolved to the *oldest* pin, so Escape closed the
+/// wrong one — and clicking a pin did not change the answer at all.
+///
+/// AppKit makes no documented promise about that array's order, so the order TriCap needs is the
+/// one TriCap maintains: newest pin in front, and any interaction brings a pin forward.
+///
+/// Stored back-to-front, so ``frontmost`` is the last element.
+public struct PinFocusOrder<ID: Hashable>: Equatable, Sendable where ID: Sendable {
+
+    private(set) public var ids: [ID] = []
+
+    public init(ids: [ID] = []) {
+        self.ids = ids
+    }
+
+    /// The pin that Escape closes, and that "close the front one" means.
+    public var frontmost: ID? { ids.last }
+
+    public var count: Int { ids.count }
+    public var isEmpty: Bool { ids.isEmpty }
+
+    /// A newly created pin appears in front of the others.
+    public mutating func insert(_ id: ID) {
+        ids.removeAll { $0 == id }
+        ids.append(id)
+    }
+
+    /// Bring a pin forward because the user touched it — a click, a drag, a scroll, a pinch or a
+    /// right-click. Unknown ids are ignored rather than resurrected, so touching a pin that is
+    /// being torn down cannot put it back in the order.
+    public mutating func touch(_ id: ID) {
+        guard ids.contains(id) else { return }
+        ids.removeAll { $0 == id }
+        ids.append(id)
+    }
+
+    /// Forget a closed pin. Idempotent: closing twice leaves the rest of the order intact, and
+    /// ``frontmost`` falls back to whatever was behind it.
+    public mutating func remove(_ id: ID) {
+        ids.removeAll { $0 == id }
+    }
+
+    public mutating func removeAll() {
+        ids.removeAll()
+    }
+
+    public func contains(_ id: ID) -> Bool { ids.contains(id) }
+}

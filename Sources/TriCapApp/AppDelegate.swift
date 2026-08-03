@@ -489,13 +489,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        var message = "Copied \(still.image.width) × \(still.image.height)"
-        if let notice = still.colorSpace.userFacingNotice {
-            toast.showNotice(notice, systemImage: "paintpalette", isWarning: true)
-        } else {
-            if !receipt.wroteRasterData { message += " (image only)" }
-            toast.showNotice(message, systemImage: "checkmark.circle.fill", isWarning: false)
-        }
+        let notice = ClipboardCopyNotice.success(
+            width: still.image.width,
+            height: still.image.height,
+            wroteRasterData: receipt.wroteRasterData,
+            colorNotice: still.colorSpace.userFacingNotice
+        )
+        toast.showNotice(notice.message, systemImage: notice.systemImage, isWarning: notice.isWarning)
         TriCapLog.app.info("screenshot copied to clipboard: \(receipt.types.joined(separator: ","), privacy: .public)")
     }
 

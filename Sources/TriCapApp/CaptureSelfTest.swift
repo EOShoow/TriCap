@@ -777,6 +777,94 @@ enum CaptureSelfTest {
         }
         GlobalHotKeyMonitor.shared.unregisterAll()
 
+        // ---- Window candidates -----------------------------------------------------------------
+        section("Selectable windows")
+        // The real window list, so the level filter is checked against what this machine actually
+        // publishes rather than against invented fixtures.
+        do {
+            let all = await WindowSurvey.currentWindows()
+            if all.isEmpty {
+                print("  NOTE  the window list is unavailable, so hover/snap degrade to free drag")
+            } else {
+                let selectable = WindowPicker.selectableWindows(
+                    in: all, ownBundleIdentifier: Bundle.main.bundleIdentifier
+                )
+                let levels = Set(all.map(\.level)).sorted()
+                let belowApplicationLayer = all.filter { $0.level < 0 }
+                print("  window levels present: \(levels.map(String.init).joined(separator: ", "))")
+                print("  \(all.count) window(s), \(selectable.count) selectable, "
+                      + "\(belowApplicationLayer.count) below the application layer")
+                for window in belowApplicationLayer.prefix(6) {
+                    print("    excluded  level \(window.level)  "
+                          + "\(Int(window.frame.width))×\(Int(window.frame.height))  "
+                          + "\(window.title ?? window.bundleIdentifier ?? "—")")
+                }
+
+                check("every selectable window is on the ordinary application layer",
+                      selectable.allSatisfy { $0.level == WindowPicker.ordinaryApplicationLayer })
+                check("nothing below the application layer survives the filter",
+                      !selectable.contains { $0.level < 0 })
+                check("TriCap's own windows are never selectable",
+                      !selectable.contains { $0.bundleIdentifier == Bundle.main.bundleIdentifier })
+
+                // The snap set has to be built from the same filtered list, or the desktop's edges
+                // tug a selection that could never have been hovered.
+                let displayBounds = DisplaySurvey.currentDisplays().map(\.appKitBounds)
+                let edges = WindowPicker.snapEdges(
+                    in: all,
+                    displayBounds: displayBounds,
+                    ownBundleIdentifier: Bundle.main.bundleIdentifier
+                )
+                check("snap edges are the selectable windows plus the displays",
+                      edges.count == selectable.count + displayBounds.count,
+                      detail: "\(edges.count) = \(selectable.count) window(s) + \(displayBounds.count) display(s)")
+                check("no excluded window contributed a snap edge",
+                      !belowApplicationLayer.contains { edges.contains($0.frame) }
+                          || belowApplicationLayer.allSatisfy { window in
+                              // A desktop window whose frame coincides exactly with a display is
+                              // indistinguishable from the display edge, which is legitimate.
+                              !edges.contains(window.frame) || displayBounds.contains(window.frame)
+                          })
+            }
+        }
+
+        // ---- Escape arbitration --------------------------------------------------------------
+        section("Escape priority")
+        // Against the *real* process-wide claim, backed by a real Carbon registration — not a fake
+        // registrar. The order below is the one that used to break: a recording is already running
+        // and the user pins something, which under a last-claim-wins stack silently took Escape
+        // away from cancellation.
+        do {
+            SharedEscapeKey.claim.reset()
+            var recordingCancelled = 0
+            var pinClosed = 0
+
+            let recordingToken = SharedEscapeKey.claim.push(priority: .recording) {
+                recordingCancelled += 1
+            }
+            check("a recording can claim the shared Escape", recordingToken != nil)
+
+            let pinToken = SharedEscapeKey.claim.push(priority: .pin) { pinClosed += 1 }
+            check("pinning during a recording still gets a claim", pinToken != nil)
+
+            SharedEscapeKey.claim.simulateFire()
+            check("Escape cancels the recording, not the pin created after it",
+                  recordingCancelled == 1 && pinClosed == 0,
+                  detail: "recording=\(recordingCancelled), pin=\(pinClosed)")
+            check("the active claim is the recording",
+                  SharedEscapeKey.claim.activePriority == .recording)
+
+            SharedEscapeKey.claim.pop(recordingToken)
+            SharedEscapeKey.claim.simulateFire()
+            check("the pin gets Escape back when the recording ends",
+                  pinClosed == 1 && recordingCancelled == 1,
+                  detail: "recording=\(recordingCancelled), pin=\(pinClosed)")
+
+            SharedEscapeKey.claim.pop(pinToken)
+            check("the key is given back once nobody wants it", !SharedEscapeKey.claim.isClaimed)
+            SharedEscapeKey.claim.reset()
+        }
+
         // ---- Pin lifecycle -------------------------------------------------------------------
         section("Pin windows")
         // The whole section runs inside one pool: putting a window on screen autoreleases it from
@@ -855,6 +943,48 @@ enum CaptureSelfTest {
                               && $0.collectionBehavior.contains(.fullScreenAuxiliary)
                       })
                 weakPin = visible.first
+            }
+
+            // Front-to-back order, tracked by TriCap rather than read out of `NSApp.windows`.
+            // A probe on this machine showed that array keeps creation order and does not change
+            // when a window is ordered front, so deriving "the frontmost pin" from it closed the
+            // *oldest* pin — the opposite of what Escape should do.
+            autoreleasepool {
+                let pinsInCreationOrder = NSApp.windows
+                    .compactMap { $0 as? PinWindow }
+                    .filter(\.isVisible)
+                    .sorted { $0.pinID < $1.pinID }
+                guard pinsInCreationOrder.count == 2 else {
+                    check("two pins available for the ordering check", false)
+                    return
+                }
+                let older = pinsInCreationOrder[0]
+                let newer = pinsInCreationOrder[1]
+
+                print("  NOTE  NSApp.windows order for the two pins: "
+                      + NSApp.windows.compactMap { ($0 as? PinWindow)?.pinID }
+                          .map(String.init).joined(separator: ",")
+                      + "  (TriCap does not rely on it)")
+
+                check("the newest pin is the frontmost one",
+                      pinboard.frontmostPinID == newer.pinID,
+                      detail: "frontmost=\(pinboard.frontmostPinID.map(String.init) ?? "nil"), newest=\(newer.pinID)")
+
+                // The user clicks the older pin: that is what "frontmost" must mean afterwards.
+                pinboard.pinDidInteract(older)
+                check("interacting with a pin brings it forward",
+                      pinboard.frontmostPinID == older.pinID,
+                      detail: "frontmost=\(pinboard.frontmostPinID.map(String.init) ?? "nil"), touched=\(older.pinID)")
+
+                // Escape closes that one, and the order falls back to the other.
+                pinboard.closeFrontmost()
+                check("Escape closes the pin the user last touched",
+                      pinboard.pinCount == 1 && pinboard.frontmostPinID == newer.pinID,
+                      detail: "remaining=\(pinboard.pinCount), frontmost=\(pinboard.frontmostPinID.map(String.init) ?? "nil")")
+                check("the closed pin released its bitmap", older.image == nil)
+
+                // Re-pin so the teardown checks below still have two windows to work with.
+                _ = pinboard.pinFromClipboard(board)
             }
 
             // Teardown has to release the windows *and* the bitmaps they hold.

@@ -222,6 +222,179 @@ struct PinOpacityTests {
     }
 }
 
+@Suite("Pin focus order")
+struct PinFocusOrderTests {
+
+    private func order(_ ids: [Int] = []) -> PinFocusOrder<Int> { PinFocusOrder(ids: ids) }
+
+    @Test("An empty board has no frontmost pin")
+    func emptyOrder() {
+        #expect(order().frontmost == nil)
+        #expect(order().isEmpty)
+    }
+
+    @Test("A newly created pin is the frontmost one")
+    func newestIsFrontmost() {
+        // The regression: this used to be derived from `NSApp.windows.firstIndex`, which a probe
+        // showed keeps creation order and does not change when a window is ordered front — so
+        // Escape closed the *oldest* pin instead of the newest.
+        var focus = order()
+        focus.insert(1)
+        focus.insert(2)
+        #expect(focus.frontmost == 2)
+        #expect(focus.ids == [1, 2])
+    }
+
+    @Test("Interacting with an older pin brings it forward")
+    func interactionChangesFrontmost() {
+        var focus = order([1, 2])
+        focus.touch(1)
+        #expect(focus.frontmost == 1)
+        #expect(focus.count == 2, "touching must not duplicate the entry")
+    }
+
+    @Test("Touching the pin that is already in front changes nothing")
+    func touchingFrontmostIsStable() {
+        var focus = order([1, 2])
+        focus.touch(2)
+        #expect(focus.ids == [1, 2])
+    }
+
+    @Test("Closing the front pin falls back to the one behind it")
+    func closeFallsBack() {
+        var focus = order([1, 2, 3])
+        focus.remove(3)
+        #expect(focus.frontmost == 2)
+        focus.remove(2)
+        #expect(focus.frontmost == 1)
+        focus.remove(1)
+        #expect(focus.frontmost == nil)
+    }
+
+    @Test("Removing the same pin twice is harmless and leaves the rest alone")
+    func removeIsIdempotent() {
+        var focus = order([1, 2, 3])
+        focus.remove(2)
+        focus.remove(2)
+        #expect(focus.ids == [1, 3])
+        #expect(focus.frontmost == 3)
+    }
+
+    @Test("Touching a pin that is not on the board does not resurrect it")
+    func touchingUnknownIsIgnored() {
+        // A pin being torn down can still deliver a trailing event; that must not put it back.
+        var focus = order([1, 2])
+        focus.remove(2)
+        focus.touch(2)
+        #expect(focus.ids == [1])
+        #expect(focus.frontmost == 1)
+    }
+
+    @Test("Inserting an id already present moves it forward rather than duplicating it")
+    func reinsertMovesForward() {
+        var focus = order([1, 2])
+        focus.insert(1)
+        #expect(focus.ids == [2, 1])
+        #expect(focus.count == 2)
+    }
+
+    @Test("removeAll empties the order")
+    func removeAllClears() {
+        var focus = order([1, 2, 3])
+        focus.removeAll()
+        #expect(focus.isEmpty)
+        #expect(focus.frontmost == nil)
+    }
+
+    @Test("Create two, interact with the first, then close — the interacted one goes")
+    func createTwoInteractThenClose() {
+        // The end-to-end sequence a user performs: pin A, pin B, click A, press Escape.
+        var focus = order()
+        focus.insert(1)          // pin A
+        focus.insert(2)          // pin B — now in front
+        focus.touch(1)           // the user clicks A
+        #expect(focus.frontmost == 1)
+
+        focus.remove(focus.frontmost!)   // Escape
+        #expect(focus.frontmost == 2, "and Escape again closes B")
+    }
+}
+
+@Suite("Clipboard copy notice")
+struct ClipboardCopyNoticeTests {
+
+    @Test("A plain sRGB copy confirms the copy and the size")
+    func sRGB() {
+        let notice = ClipboardCopyNotice.success(
+            width: 1440, height: 900, wroteRasterData: true, colorNotice: nil
+        )
+        #expect(notice.message == "Copied 1440 × 900")
+        #expect(!notice.isWarning)
+    }
+
+    @Test("A P3 or HDR copy still says it was copied")
+    func wideGamutStillConfirms() {
+        // The regression: the colour advisory used to *replace* the confirmation, so on a modern
+        // P3 display — the common case — the user was never told the screenshot had been copied.
+        let notice = ClipboardCopyNotice.success(
+            width: 1440, height: 900, wroteRasterData: true,
+            colorNotice: "Converted from Display P3 to sRGB."
+        )
+        #expect(notice.message.contains("Copied"))
+        #expect(notice.message.contains("1440 × 900"))
+        #expect(notice.message.contains("Display P3"), "the advisory is kept, not dropped")
+        #expect(notice.isWarning, "still worth flagging — but as a successful copy")
+    }
+
+    @Test("The confirmation comes before the colour advisory")
+    func successLeadsTheMessage() {
+        let notice = ClipboardCopyNotice.success(
+            width: 800, height: 600, wroteRasterData: true, colorNotice: "HDR was tone-mapped."
+        )
+        #expect(notice.message.hasPrefix("Copied 800 × 600"))
+    }
+
+    @Test("An image-only pasteboard is flagged without losing the confirmation")
+    func imageOnly() {
+        let notice = ClipboardCopyNotice.success(
+            width: 640, height: 480, wroteRasterData: false, colorNotice: nil
+        )
+        #expect(notice.message == "Copied 640 × 480 (image only)")
+        #expect(!notice.isWarning)
+    }
+
+    @Test("Image-only and a colour advisory together keep all three facts")
+    func imageOnlyAndWideGamut() {
+        let notice = ClipboardCopyNotice.success(
+            width: 640, height: 480, wroteRasterData: false, colorNotice: "Converted to sRGB."
+        )
+        #expect(notice.message.hasPrefix("Copied 640 × 480 (image only)"))
+        #expect(notice.message.contains("Converted to sRGB."))
+        #expect(notice.isWarning)
+    }
+
+    @Test("Every outcome names the pixel size", arguments: [
+        (true, String?.none), (true, .some("note")), (false, String?.none), (false, .some("note")),
+    ])
+    func alwaysStatesTheSize(raster: Bool, colorNotice: String?) {
+        let notice = ClipboardCopyNotice.success(
+            width: 123, height: 45, wroteRasterData: raster, colorNotice: colorNotice
+        )
+        #expect(notice.message.contains("Copied"))
+        #expect(notice.message.contains("123 × 45"))
+        #expect(!notice.systemImage.isEmpty)
+    }
+
+    @Test("An empty colour notice is treated as no notice")
+    func emptyColorNotice() {
+        let notice = ClipboardCopyNotice.success(
+            width: 10, height: 10, wroteRasterData: true, colorNotice: ""
+        )
+        #expect(notice.message == "Copied 10 × 10")
+        #expect(!notice.isWarning)
+    }
+}
+
 @Suite("Pasteboard image policy")
 struct PasteboardImagePolicyTests {
 

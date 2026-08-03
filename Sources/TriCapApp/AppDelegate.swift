@@ -24,7 +24,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
+    private var welcomeWindow: NSWindow?
     private let editorPresenter = EditorPresenter()
+    private let toast = ExportToastPresenter()
 
     private var selector: RegionSelector?
     /// The one live recording, if any. Owned by the running `Task` in `beginCapture`.
@@ -60,6 +62,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             TriCapLog.app.error("save directory unavailable: \(error, privacy: .public)")
         }
         TriCapLog.app.info("TriCap \(TriCapVersion.app, privacy: .public) launched (libwebp \(TriCapVersion.libwebpVersion, privacy: .public))")
+
+        // A menu-bar app with no Dock icon is invisible on first launch. Say hello once.
+        if !store.hasSeenWelcome {
+            store.hasSeenWelcome = true
+            showWelcome()
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -83,27 +91,63 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        let permission = ScreenRecordingPermission.authorizationStatus()
 
-        let capture = NSMenuItem(
-            title: "Capture Region…",
-            action: #selector(captureRegion),
-            keyEquivalent: ""
-        )
-        capture.target = self
-        menu.addItem(capture)
+        // When TriCap cannot capture, say so first and offer the fix — an app whose only two
+        // commands silently fail is worse than one that explains itself.
+        if permission != .authorized {
+            let warning = NSMenuItem(
+                title: permission == .denied
+                    ? "Screen Recording is turned off"
+                    : "Screen Recording not allowed yet",
+                action: nil,
+                keyEquivalent: ""
+            )
+            warning.image = NSImage(
+                systemSymbolName: permission == .denied ? "exclamationmark.triangle.fill" : "lock.shield",
+                accessibilityDescription: nil
+            )
+            warning.isEnabled = false
+            menu.addItem(warning)
 
-        let record = NSMenuItem(
-            title: "Record Region…",
-            action: #selector(recordRegion),
-            keyEquivalent: ""
-        )
-        record.target = self
-        menu.addItem(record)
+            let fix = NSMenuItem(
+                title: permission == .denied ? "Open System Settings…" : "Allow Screen Recording…",
+                action: permission == .denied ? #selector(openPermissionSettings) : #selector(requestPermissionFromMenu),
+                keyEquivalent: ""
+            )
+            fix.target = self
+            menu.addItem(fix)
+            menu.addItem(.separator())
+        }
+
+        if gate.isBusy {
+            let busy = NSMenuItem(title: "Capture in progress…", action: nil, keyEquivalent: "")
+            busy.isEnabled = false
+            menu.addItem(busy)
+        } else {
+            let capture = NSMenuItem(
+                title: "Capture Region…",
+                action: #selector(captureRegion),
+                keyEquivalent: ""
+            )
+            capture.target = self
+            capture.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: nil)
+            menu.addItem(capture)
+
+            let record = NSMenuItem(
+                title: "Record Region…",
+                action: #selector(recordRegion),
+                keyEquivalent: ""
+            )
+            record.target = self
+            record.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: nil)
+            menu.addItem(record)
+        }
 
         menu.addItem(.separator())
 
         let shortcut = NSMenuItem(
-            title: "Shortcut: \(store.settings.hotKey.displayString)",
+            title: "Shortcut  \(store.settings.hotKey.displayString)  ·  press anywhere",
             action: nil,
             keyEquivalent: ""
         )
@@ -119,6 +163,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(reveal)
 
         menu.addItem(.separator())
+
+        let welcome = NSMenuItem(title: "Getting Started…", action: #selector(showWelcomeFromMenu), keyEquivalent: "")
+        welcome.target = self
+        menu.addItem(welcome)
 
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
@@ -170,19 +218,81 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func captureRegion() { beginCapture(mode: .still) }
     @objc private func recordRegion() { beginCapture(mode: .recording) }
 
+    @objc private func openPermissionSettings() {
+        ScreenRecordingPermission.openSystemSettings()
+    }
+
+    @objc private func requestPermissionFromMenu() {
+        _ = ScreenRecordingPermission.request()
+        refreshMenu()
+    }
+
+    @objc private func showWelcomeFromMenu() { showWelcome() }
+
+    /// The first-run window, also reachable from the menu and from Settings → About.
+    func showWelcome() {
+        if let welcomeWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            welcomeWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let view = WelcomeView(
+            shortcut: store.settings.hotKey,
+            permissionStatus: ScreenRecordingPermission.authorizationStatus(),
+            onGrantPermission: { [weak self] in
+                _ = ScreenRecordingPermission.request()
+                self?.refreshMenu()
+                self?.reopenWelcome()
+            },
+            onOpenSystemSettings: { ScreenRecordingPermission.openSystemSettings() },
+            onTryCapture: { [weak self] in
+                self?.closeWelcome()
+                self?.beginCapture(mode: .still)
+            },
+            onOpenSettings: { [weak self] in self?.showSettings() },
+            onDismiss: { [weak self] in self?.closeWelcome() }
+        )
+
+        let hosting = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Welcome to TriCap"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.delegate = self
+        welcomeWindow = window
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func closeWelcome() {
+        welcomeWindow?.close()
+        welcomeWindow = nil
+    }
+
+    /// Rebuild the window so the permission step reflects the new answer.
+    private func reopenWelcome() {
+        closeWelcome()
+        showWelcome()
+    }
+
     @objc private func openSaveFolder() {
         store.prepareSaveDirectory()
         NSWorkspace.shared.open(store.settings.saveDirectoryURL)
     }
 
-    @objc private func showSettings() {
+    @objc func showSettings() {
         if let settingsWindow {
             NSApp.activate(ignoringOtherApps: true)
             settingsWindow.makeKeyAndOrderFront(nil)
             return
         }
 
-        let hosting = NSHostingController(rootView: SettingsView(store: store))
+        let hosting = NSHostingController(
+            rootView: SettingsView(store: store, onShowWelcome: { [weak self] in self?.showWelcome() })
+        )
         let window = NSWindow(contentViewController: hosting)
         window.title = "TriCap Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]
@@ -205,12 +315,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// trigger overwrite the live recorder, HUD, stop target and cancel key.
     private func beginCapture(mode: RegionSelector.CaptureMode) {
         guard gate.tryBegin() else { return }
+        toast.dismiss()
+        refreshMenu()
 
         Task { @MainActor in
             defer {
                 gate.end()
                 recordingSession = nil
                 selector = nil
+                refreshMenu()
             }
 
             guard await ensurePermission() else { return }
@@ -344,19 +457,45 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let settings = store.settings
         let pasteboard = NSPasteboard.general
 
+        // Track what actually happened rather than what the settings asked for, so the
+        // confirmation can never claim a copy that did not take place.
+        var copiedImage = false
+        var copiedReference = false
+
         if settings.copyReferenceAfterExport || settings.copyImageAfterExport {
             pasteboard.clearContents()
         }
         if settings.copyImageAfterExport, let image = NSImage(contentsOf: result.url) {
-            pasteboard.writeObjects([image])
+            copiedImage = pasteboard.writeObjects([image])
         }
         if settings.copyReferenceAfterExport {
-            pasteboard.setString(result.reference, forType: .string)
+            copiedReference = pasteboard.setString(result.reference, forType: .string)
         }
 
-        TriCapLog.app.info(
-            "export complete: \(result.url.lastPathComponent, privacy: .public) container=\(result.container.rawValue, privacy: .public)"
+        // A reference that is a bare path is a different promise from a Markdown embed; the
+        // summary says which so the user knows what they are about to paste.
+        let insideVault = settings.markdownVaultRootURL.map { root in
+            MarkdownReference.relativePath(of: result.url, inside: root) != nil
+        } ?? false
+
+        let summary = ExportSummary.make(
+            from: result,
+            copiedReference: copiedReference,
+            copiedImage: copiedImage,
+            insideVault: insideVault
         )
+        toast.show(summary: summary, fileURL: result.url, thumbnail: thumbnail(for: result.url))
+
+        TriCapLog.app.info(
+            "export complete: \(result.url.lastPathComponent, privacy: .public) container=\(result.container.rawValue, privacy: .public) clipboard=\(summary.clipboardDescription ?? "none", privacy: .public)"
+        )
+    }
+
+    /// A small preview for the toast. Best-effort: a missing thumbnail just shows a placeholder.
+    private func thumbnail(for url: URL) -> NSImage? {
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        image.size = NSSize(width: 112, height: 112)
+        return image
     }
 
     // MARK: - Alerts
@@ -413,6 +552,10 @@ extension AppDelegate: NSWindowDelegate {
         if window === settingsWindow {
             settingsWindow = nil
             refreshMenu()
+            return
+        }
+        if window === welcomeWindow {
+            welcomeWindow = nil
             return
         }
         editorPresenter.release(window)

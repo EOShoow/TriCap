@@ -15,6 +15,9 @@ public final class RecordingHUD {
     private var frameLabel: NSTextField?
     private var borderWindow: NSWindow?
     private var escapeNotice: NSTextField?
+    private var hintLabel: NSTextField?
+    private var progressBar: NSProgressIndicator?
+    private var countdownHintLabel: NSTextField?
 
     /// One proxy per HUD instance. A shared singleton would let a second recording's HUD rebind
     /// the first one's Stop button.
@@ -28,13 +31,28 @@ public final class RecordingHUD {
     public func runCountdown(seconds: Int, over region: CaptureRegion) async -> Bool {
         guard seconds > 0 else { return true }
 
-        let window = makeFloatingWindow(size: CGSize(width: 160, height: 160), centeredOn: region)
+        let window = makeFloatingWindow(size: CGSize(width: 180, height: 176), centeredOn: region)
         let label = NSTextField(labelWithString: "\(seconds)")
         label.font = .systemFont(ofSize: 84, weight: .semibold)
         label.textColor = .white
         label.alignment = .center
-        label.frame = CGRect(x: 0, y: 30, width: 160, height: 100)
+        label.frame = CGRect(x: 0, y: 52, width: 180, height: 100)
         window.contentView?.addSubview(label)
+
+        let caption = NSTextField(labelWithString: "Recording starts…")
+        caption.font = .systemFont(ofSize: 12, weight: .medium)
+        caption.textColor = NSColor.white.withAlphaComponent(0.85)
+        caption.alignment = .center
+        caption.frame = CGRect(x: 0, y: 32, width: 180, height: 18)
+        window.contentView?.addSubview(caption)
+
+        let cancelHint = NSTextField(labelWithString: "Esc to cancel")
+        cancelHint.font = .systemFont(ofSize: 11)
+        cancelHint.textColor = NSColor.white.withAlphaComponent(0.6)
+        cancelHint.alignment = .center
+        cancelHint.frame = CGRect(x: 0, y: 14, width: 180, height: 16)
+        window.contentView?.addSubview(cancelHint)
+        countdownHintLabel = cancelHint
         window.orderFrontRegardless()
         countdownWindow = window
 
@@ -64,8 +82,21 @@ public final class RecordingHUD {
     public func showRecordingHUD(region: CaptureRegion, onStop: @escaping () -> Void) {
         showRegionOutline(region)
 
-        let window = makeFloatingWindow(size: CGSize(width: 268, height: 56), belowTopOf: region)
+        let window = makeFloatingWindow(size: Self.hudSize, belowTopOf: region)
         guard let content = window.contentView else { return }
+        populateHUD(content, onStop: onStop)
+        window.orderFrontRegardless()
+        hudWindow = window
+    }
+
+    /// Size of the live HUD panel.
+    public static let hudSize = CGSize(width: 300, height: 74)
+
+    /// Build the HUD's contents into `content`.
+    ///
+    /// Shared with the offscreen UI-snapshot renderer so a screenshot of "the recording HUD" is
+    /// the real thing rather than a hand-maintained copy that can drift out of date.
+    public func populateHUD(_ content: NSView, onStop: @escaping () -> Void) {
 
         // The HUD is a dark panel, so its controls must be drawn in dark mode; the default
         // (light) appearance renders the push button as dark text on a dark bezel, which is
@@ -77,10 +108,10 @@ public final class RecordingHUD {
         stop.bezelStyle = .rounded
         stop.keyEquivalent = "\r"
         stop.contentTintColor = .white
-        stop.frame = CGRect(x: 196, y: 14, width: 58, height: 28)
+        stop.frame = CGRect(x: 226, y: 32, width: 58, height: 28)
         content.addSubview(stop)
 
-        let dot = NSView(frame: CGRect(x: 16, y: 24, width: 10, height: 10))
+        let dot = NSView(frame: CGRect(x: 16, y: 42, width: 10, height: 10))
         dot.wantsLayer = true
         dot.layer?.backgroundColor = NSColor.systemRed.cgColor
         dot.layer?.cornerRadius = 5
@@ -89,24 +120,42 @@ public final class RecordingHUD {
         let elapsed = NSTextField(labelWithString: "0.0 s")
         elapsed.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
         elapsed.textColor = .white
-        elapsed.frame = CGRect(x: 34, y: 28, width: 150, height: 20)
+        elapsed.frame = CGRect(x: 34, y: 46, width: 180, height: 20)
         content.addSubview(elapsed)
         elapsedLabel = elapsed
 
         let frames = NSTextField(labelWithString: "0 frames")
         frames.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         frames.textColor = NSColor.white.withAlphaComponent(0.7)
-        frames.frame = CGRect(x: 34, y: 10, width: 150, height: 16)
+        frames.frame = CGRect(x: 34, y: 30, width: 180, height: 16)
         content.addSubview(frames)
         frameLabel = frames
 
-        window.orderFrontRegardless()
-        hudWindow = window
+        // How close the recording is to its own ceiling. Without it the limit arrives as a
+        // surprise: the clip simply stops.
+        let progress = NSProgressIndicator(frame: CGRect(x: 16, y: 22, width: 268, height: 4))
+        progress.isIndeterminate = false
+        progress.style = .bar
+        progress.minValue = 0
+        progress.maxValue = 1
+        progress.doubleValue = 0
+        content.addSubview(progress)
+        progressBar = progress
+
+        // The global Escape hot key is claimed for the whole recording; say so, because a
+        // key that works everywhere is worthless if nobody knows it exists.
+        let hint = NSTextField(labelWithString: "Esc cancels · Return stops")
+        hint.font = .systemFont(ofSize: 10)
+        hint.textColor = NSColor.white.withAlphaComponent(0.6)
+        hint.frame = CGRect(x: 16, y: 5, width: 268, height: 14)
+        content.addSubview(hint)
+        hintLabel = hint
     }
 
     public func update(progress: RecordingProgress, limits: RecordingLimits) {
         elapsedLabel?.stringValue = String(format: "%.1f s / %.0f s", progress.elapsed, limits.maxDuration)
         frameLabel?.stringValue = "\(progress.frameCount) frames · \(progress.retainedBytes / 1_048_576) MB"
+        progressBar?.doubleValue = min(1, progress.elapsed / max(0.001, limits.maxDuration))
     }
 
     public func dismiss() {
@@ -121,18 +170,19 @@ public final class RecordingHUD {
         elapsedLabel = nil
         frameLabel = nil
         escapeNotice = nil
+        hintLabel = nil
+        progressBar = nil
+        countdownHintLabel = nil
     }
 
     /// Replace the "Esc to cancel" affordance with an honest notice when the global Escape hot key
     /// could not be claimed (another application already owns it).
     public func showEscapeUnavailableNotice() {
-        guard let content = hudWindow?.contentView, escapeNotice == nil else { return }
-        let notice = NSTextField(labelWithString: "Esc unavailable — use Stop")
-        notice.font = .systemFont(ofSize: 10)
-        notice.textColor = NSColor.systemYellow
-        notice.frame = CGRect(x: 34, y: -4, width: 200, height: 14)
-        content.addSubview(notice)
-        escapeNotice = notice
+        guard escapeNotice == nil else { return }
+        // Replace the hint rather than adding a second line that contradicts it.
+        hintLabel?.stringValue = "Esc unavailable — click Stop"
+        hintLabel?.textColor = NSColor.systemYellow
+        escapeNotice = hintLabel
     }
 
     // MARK: - Chrome

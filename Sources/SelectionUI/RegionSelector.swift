@@ -21,12 +21,11 @@ public final class RegionSelector {
 
         public var toggled: CaptureMode { self == .still ? .recording : .still }
 
-        public var hint: String {
+        /// Shown in the overlay's mode banner.
+        public var displayName: String {
             switch self {
-            case .still:
-                return "Drag to capture a screenshot   ·   R to record instead   ·   Esc to cancel"
-            case .recording:
-                return "Drag to record a clip   ·   S for a screenshot instead   ·   Esc to cancel"
+            case .still: return "Take a screenshot"
+            case .recording: return "Record a clip"
             }
         }
     }
@@ -88,7 +87,6 @@ public final class RegionSelector {
             let view = SelectionOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size))
             view.autoresizingMask = [.width, .height]
             view.delegate = self
-            view.hintText = mode.hint
             view.isRecordingMode = mode == .recording
             window.contentView = view
 
@@ -147,7 +145,6 @@ public final class RegionSelector {
 
     private func applyMode() {
         for view in views {
-            view.hintText = mode.hint
             view.isRecordingMode = mode == .recording
         }
     }

@@ -365,3 +365,87 @@ struct WebPCoalescingTests {
         #expect(info.totalDurationMs == 1000)
     }
 }
+
+@Suite("Quality parameter reality check")
+struct QualityParameterRealityTests {
+
+    /// A gradient compresses differently at different quality factors; a flat colour may not.
+    private func detailedImage(width: Int = 200, height: Int = 150) -> CGImage {
+        let ctx = ImageProcessing.makeContext(width: width, height: height)!
+        for y in 0..<height {
+            for x in 0..<width {
+                let r = Double((x &* 7 &+ y &* 13) % 256) / 255.0
+                let g = Double((x &* 3 &+ y &* 29) % 256) / 255.0
+                let b = Double((x &* 17 &+ y &* 5) % 256) / 255.0
+                ctx.setFillColor(CGColor(red: r, green: g, blue: b, alpha: 1))
+                ctx.fill(CGRect(x: x, y: y, width: 1, height: 1))
+            }
+        }
+        return ctx.makeImage()!
+    }
+
+    @Test("PNG ignores the quality parameter entirely — the UI must not offer one")
+    func pngIgnoresQuality() throws {
+        let image = detailedImage()
+        let low = try StillImageCodec.encode(image, format: .png, quality: 1)
+        let high = try StillImageCodec.encode(image, format: .png, quality: 100)
+        #expect(low == high)
+        #expect(OutputFormat.png.usesQualityParameter == false)
+    }
+
+    @Test("JPEG and static WebP really do respond to quality")
+    func lossyFormatsRespondToQuality() throws {
+        let image = detailedImage()
+        for format in [OutputFormat.jpeg, .webp] {
+            let low = try StillImageCodec.encode(image, format: format, quality: 20)
+            let high = try StillImageCodec.encode(image, format: format, quality: 95)
+            #expect(low.count < high.count, "\(format.displayName): q20 \(low.count) vs q95 \(high.count)")
+            #expect(format.usesQualityParameter)
+        }
+    }
+
+    /// Flat colour blocks encode to the same bytes at any quality — libwebp has nothing to throw
+    /// away. The quality factor only becomes observable on frames with real detail.
+    private func noisyFrame(width: Int, height: Int, seed: Int) -> CGImage {
+        let ctx = ImageProcessing.makeContext(width: width, height: height)!
+        for y in 0..<height {
+            for x in 0..<width {
+                let n = (x &* 37 &+ y &* 71 &+ seed &* 13)
+                ctx.setFillColor(CGColor(
+                    red: Double(n % 256) / 255.0,
+                    green: Double((n &* 3) % 256) / 255.0,
+                    blue: Double((n &* 7) % 256) / 255.0,
+                    alpha: 1
+                ))
+                ctx.fill(CGRect(x: x, y: y, width: 1, height: 1))
+            }
+        }
+        return ctx.makeImage()!
+    }
+
+    @Test("Animated WebP really does respond to quality")
+    func animationRespondsToQuality() throws {
+        let frames = (0..<4).map {
+            WebPCodec.AnimationFrame(
+                image: noisyFrame(width: 120, height: 90, seed: $0),
+                timestampMs: $0 * 100
+            )
+        }
+        let low = try WebPCodec.encodeAnimation(
+            frames: frames, canvasSize: CGSize(width: 120, height: 90), endTimestampMs: 400,
+            options: AnimatedWebPOptions(quality: 20)
+        )
+        let high = try WebPCodec.encodeAnimation(
+            frames: frames, canvasSize: CGSize(width: 120, height: 90), endTimestampMs: 400,
+            options: AnimatedWebPOptions(quality: 95)
+        )
+
+        // The claim under test is that the control reaches the encoder, which is what the settings
+        // UI promises. Size is deliberately *not* asserted to be monotonic here: TriCap encodes
+        // animations with `allow_mixed`, so libwebp may pick a lossless frame at a high quality
+        // factor and produce a smaller file than a lossy frame at a low one. Monotonic size is
+        // asserted for the still formats above, where no such mode switch happens.
+        #expect(low != high, "quality made no difference: \(low.count) vs \(high.count) bytes")
+        #expect(OutputFormat.animatedWebP.usesQualityParameter)
+    }
+}

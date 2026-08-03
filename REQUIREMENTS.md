@@ -64,6 +64,26 @@ Raised by Codex against `83a8c12`, then independently re-reviewed against `f521a
 | B9 | HUD Stop button was dark-on-dark | `.darkAqua` appearance on the HUD content view | snapshot 05 |
 | B10 | A one-frame clip's sliders exposed index 1 | `ClipTrimUI` + the editor hides the sliders entirely | *Clip trim slider ranges* (4) · snapshot 07 |
 
+## Usability and quality round
+
+| # | UX problem | Fix | Verified by |
+|---|---|---|---|
+| P0-1 | A menu-bar app with no Dock icon is invisible on first launch; nothing explains the icon, the shortcut or the permission | [WelcomeView.swift](Sources/TriCapApp/WelcomeView.swift), shown once via `SettingsStore.hasSeenWelcome`, reopenable from the menu and About | snapshot 09 · launch check (flag flips) |
+| P0-2 | A Quality control was shown for PNG, which ignores it | `OutputFormat.usesQualityParameter`; the Advanced section shows *Lossless — no setting* | *Quality parameter reality check* (3), *Format-conditional quality controls* (4) · snapshot 08 |
+| P0-3 | After saving, nothing said where the file went or what was copied | [ExportSummary.swift](Sources/ExportCore/ExportSummary.swift) + [ExportToast.swift](Sources/TriCapApp/ExportToast.swift), with **Show in Finder** | *Export summary wording* (8) · snapshot 10 |
+| P0-4 | The menu bar was identical whether or not TriCap could actually capture | `AppDelegate.buildMenu` shows permission state, a fix action, and *Capture in progress…* | manual (§4) |
+| P0-5 | The overlay's mode hint vanished on mouse-down and never said what release would do | Persistent mode banner, corner brackets, *Release to capture* / *Release to start recording* | snapshots 04, 11 |
+| P1-6 | Quality was raw encoder parameters with no result-oriented choice | [QualityPreset.swift](Sources/TriCapKit/QualityPreset.swift) — four presets, Custom as a state, plain-language size guidance | *Quality presets* (6), *Quality preset ↔ encoder parameters* (6), *Settings migration* (5) |
+| P1-7 | The recording HUD had no cancel affordance and no sense of the limit | Progress bar toward `maxDuration`, `Esc cancels · Return stops`, countdown caption | snapshots 05, 12 |
+| P1-8 | Tool glyphs were unlabelled with no shortcuts | Named active tool, `⌘1`–`⌘5`, purpose-first tooltips | *Annotation tool affordances* (3) · snapshots 02, 03 |
+| P1-9 | Settings mixed limits with quality and always showed every parameter | Four tabs; Quality gets preset → format → advanced | snapshots 01, 08 |
+| P1-10 | The editor never showed where the file would go | `Saves to …` line, plus **Show in Finder** after saving | snapshots 02, 03 |
+
+Also fixed while testing the migration: `RecordingLimits` and `AnimatedWebPOptions` decoded
+straight into their stored properties, bypassing their own clamping initializers, so a corrupt or
+future settings blob could load a 999 fps / 99999 px configuration. Both now decode through the
+clamping initializer (*Settings migration* → "An out-of-range legacy value is clamped").
+
 ## Deliverables
 
 | Deliverable | Location |

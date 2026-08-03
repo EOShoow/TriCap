@@ -48,6 +48,9 @@ public final class EditorModel: ObservableObject {
     /// Set when a recording was cut short by one of the configured limits.
     public let truncationNotice: String?
 
+    /// Where the last successful export went, so the editor can offer to reveal it.
+    @Published public private(set) var savedFileURL: URL?
+
     private let settings: AppSettings
     private var frameCache: (index: Int, image: CGImage)?
     private let onExported: (ExportResult) -> Void
@@ -134,6 +137,28 @@ public final class EditorModel: ObservableObject {
               let range = ClipTrimmer.normalizedRange(first: trimStart, last: trimEnd, count: clip.frames.count)
         else { return 0 }
         return ClipTrimmer.trimmedDuration(frames: clip.frames, range: range, clipDuration: clip.duration)
+    }
+
+    /// Human-readable save destination, shown before the user commits to saving.
+    public var saveDirectoryDisplayPath: String {
+        (settings.saveDirectoryURL.path as NSString).abbreviatingWithTildeInPath
+    }
+
+    /// What the selected format will do to the pixels — including "nothing", for PNG.
+    ///
+    /// The editor used to show a format picker with no indication of whether a quality setting
+    /// applied, so PNG and JPEG looked identically configurable.
+    public var qualityDescription: String {
+        let format = source.isClip ? OutputFormat.animatedWebP : format
+        guard format.usesQualityParameter else { return "Lossless" }
+        let quality = format.isAnimated ? settings.animatedWebPOptions.quality : settings.stillQuality
+        return "Quality \(quality)"
+    }
+
+    /// Reveal the exported file in Finder.
+    public func revealSavedFile() {
+        guard let savedFileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([savedFileURL])
     }
 
     /// The image drawn underneath the annotations right now.
@@ -263,6 +288,7 @@ public final class EditorModel: ObservableObject {
         isExporting = false
         switch outcome {
         case .success(let result):
+            savedFileURL = result.url
             var message = "Saved \(result.url.lastPathComponent)"
             if let info = result.animationInfo, let submitted = result.submittedFrameCount {
                 message += " — \(info.frameCount) of \(submitted) frames stored, \(info.totalDurationMs) ms"

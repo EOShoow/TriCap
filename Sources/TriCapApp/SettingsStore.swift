@@ -20,10 +20,26 @@ public final class SettingsStore: ObservableObject {
     @Published public var settings: AppSettings {
         didSet {
             guard settings != oldValue else { return }
+            // Any edit to an advanced encoder value re-derives the preset label, so a hand-tuned
+            // setting reads as Custom immediately instead of continuing to claim a preset it no
+            // longer matches.
+            let reconciled = settings.reconciledForQualityPreset()
+            if reconciled != settings {
+                settings = reconciled  // re-enters once; the guard above stops it there
+                return
+            }
             persist()
             onChange?(oldValue, settings)
         }
     }
+
+    /// `true` until the user has been shown the welcome window once.
+    public var hasSeenWelcome: Bool {
+        get { defaults.bool(forKey: Self.welcomeShownKey) }
+        set { defaults.set(newValue, forKey: Self.welcomeShownKey) }
+    }
+
+    static let welcomeShownKey = "app.tricap.hasSeenWelcome"
 
     private let defaults: UserDefaults
 

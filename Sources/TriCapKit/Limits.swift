@@ -33,6 +33,23 @@ public struct RecordingLimits: Sendable, Equatable, Codable {
         self.maxFrameBufferBytes = max(16 * 1024 * 1024, maxFrameBufferBytes)
     }
 
+    /// Decoding routes through the clamping initializer.
+    ///
+    /// The synthesised `Codable` conformance would assign the stored properties directly and skip
+    /// every range check, so a settings blob written by a future build — or simply corrupted —
+    /// could load a 999 fps, 99999 px recording configuration that the UI has no way to represent
+    /// and the capture path was never designed for.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = RecordingLimits()
+        self.init(
+            frameRate: try c.decodeIfPresent(Int.self, forKey: .frameRate) ?? fallback.frameRate,
+            maxDuration: try c.decodeIfPresent(TimeInterval.self, forKey: .maxDuration) ?? fallback.maxDuration,
+            maxLongEdgePixels: try c.decodeIfPresent(Int.self, forKey: .maxLongEdgePixels) ?? fallback.maxLongEdgePixels,
+            maxFrameBufferBytes: try c.decodeIfPresent(Int.self, forKey: .maxFrameBufferBytes) ?? fallback.maxFrameBufferBytes
+        )
+    }
+
     /// Absolute ceiling on retained frames. `+1` because a recording that runs the full
     /// duration legitimately produces a frame at t=0 *and* one at t=maxDuration.
     public var maxFrameCount: Int {
@@ -63,6 +80,19 @@ public struct AnimatedWebPOptions: Sendable, Equatable, Codable {
         self.loopCount = max(0, loopCount)
         self.lossless = lossless
         self.method = method.clamped(to: 0...6)
+    }
+
+    /// As with ``RecordingLimits``, decoding goes through the clamping initializer so an
+    /// out-of-range stored value cannot reach libwebp.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = AnimatedWebPOptions()
+        self.init(
+            quality: try c.decodeIfPresent(Int.self, forKey: .quality) ?? fallback.quality,
+            loopCount: try c.decodeIfPresent(Int.self, forKey: .loopCount) ?? fallback.loopCount,
+            lossless: try c.decodeIfPresent(Bool.self, forKey: .lossless) ?? fallback.lossless,
+            method: try c.decodeIfPresent(Int.self, forKey: .method) ?? fallback.method
+        )
     }
 
     public static let `default` = AnimatedWebPOptions()

@@ -122,6 +122,31 @@ The trade is explicit: while a recording runs (at most `RecordingLimits.maxDurat
 intercepted system-wide. If another application already owns a bare Escape hot key, the HUD says
 so instead of pretending Escape is wired up.
 
+## Quality presets
+
+`QualityPreset` (in `TriCapKit`) names an outcome — *Smaller file*, *Balanced*, *Sharper*,
+*Maximum* — and stands for four concrete encoder arguments: the still quality factor, the
+recording long-edge cap, the recording frame rate, and the animation quality factor. Those four
+are exactly the values that reach `StillImageCodec.encode(quality:)`, `SCStreamConfiguration` and
+`WebPConfig`, which is what the tests assert.
+
+`custom` is a *state*, not a menu item. `AppSettings.reconcileQualityPreset()` re-derives the
+label from the values after every edit, so:
+
+- editing any advanced field drops the label to Custom and keeps the user's numbers;
+- applying `.custom` is a no-op, because there are no canonical values to write;
+- a settings blob with no `qualityPreset` key (written by a build that predates presets) loads as
+  Custom with every value preserved, rather than being snapped to a preset — which would silently
+  change the quality an existing user was already getting.
+
+`applyQualityPreset` reads the label back off the *clamped* values rather than trusting its
+argument, so a preset whose numbers fell outside `RecordingLimits`' ranges could not claim to be
+applied when it was not.
+
+`OutputFormat.usesQualityParameter` is what keeps the UI honest: PNG is lossless, `encodePNG`
+takes no quality argument, and the settings window shows *Lossless — no setting* instead of a
+control that does nothing.
+
 ## Coordinate model
 
 This is the highest-risk part of a screenshot tool, so it is worth stating precisely.
@@ -242,6 +267,21 @@ Three claim mechanisms, tried in order, because not every filesystem implements 
 `link(2)` returns `EPERM` on exFAT/FAT and `ENOTSUP` on many network mounts; treating that as a
 hard failure meant a save folder on a USB stick or a NAS could not be written to at all. Those
 errno values now fall through to the next strategy, while a real error still propagates.
+
+## Feedback surfaces
+
+Three small types exist so that what the user is *told* is testable, not just drawn:
+
+- `ExportSummary` (in `ExportCore`) turns an `ExportResult` plus the actual pasteboard outcomes
+  into the confirmation wording. It takes what *happened* — the `Bool` each pasteboard write
+  returned — rather than what the settings asked for, so the toast cannot claim a copy that did
+  not occur, and it names the *kind* of thing copied ("the Markdown reference" vs "the file path")
+  because those are very different things to paste into a note.
+- `RecordingHUD.populateHUD` builds the HUD body, and both the live floating panel and the
+  offscreen UI-snapshot renderer call it. Previously the snapshot rebuilt the HUD by hand and
+  drifted out of date the moment the real one changed.
+- `WelcomeView` is a plain SwiftUI view driven by `HotKeyCombo` and `ScreenRecordingAuthorization`,
+  so every permission state renders without a live TCC prompt.
 
 ## Editor window ownership
 

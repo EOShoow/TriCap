@@ -21,12 +21,36 @@ public enum AnnotationTool: String, Codable, CaseIterable, Sendable, Identifiabl
         }
     }
 
+    /// 1-based position in the toolbar, which is also its keyboard shortcut.
+    public var shortcutNumber: Int {
+        switch self {
+        case .arrow: return 1
+        case .rectangle: return 2
+        case .text: return 3
+        case .freehand: return 4
+        case .mosaic: return 5
+        }
+    }
+
+    /// Tooltip copy: what the tool does, not just what it is called.
+    public var toolTip: String {
+        switch self {
+        case .arrow: return "Arrow — point at something (\u{2318}1)"
+        case .rectangle: return "Rectangle — box something off (\u{2318}2)"
+        case .text: return "Text — click, then type (\u{2318}3)"
+        case .freehand: return "Pen — draw freehand (\u{2318}4)"
+        case .mosaic: return "Mosaic — blur out anything private (\u{2318}5)"
+        }
+    }
+
     /// SF Symbol used by the editor toolbar.
     public var symbolName: String {
         switch self {
         case .arrow: return "arrow.up.right"
         case .rectangle: return "rectangle"
-        case .text: return "textformat"
+        // `textformat` is a locale-adaptive symbol: on a Chinese system it renders as 格式,
+        // which reads as a word next to four pictographs. `t.square` is stable everywhere.
+        case .text: return "t.square"
         case .freehand: return "scribble"
         case .mosaic: return "mosaic"
         }

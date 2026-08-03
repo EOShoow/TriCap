@@ -7,6 +7,8 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 
 ## What it does
 
+- **First launch** shows a short Getting Started window: where the menu-bar icon is, how to grant
+  Screen Recording, and what the shortcut is. Reopen it any time from the menu or Settings → About.
 - **Global shortcut** (default `⌥⇧5`) opens a full-screen region picker across every display.
 - In the picker: drag to capture a **screenshot**, press **R** to switch to **recording** mode
   (**S** switches back), **Esc** cancels.
@@ -19,6 +21,8 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 - **Export** PNG, JPEG, static WebP, or Animated WebP.
 - **Copy a reference** to the clipboard: a *relative* Markdown/Obsidian image reference when the
   file lands inside your configured vault root, otherwise the absolute file path.
+- **After saving**, a confirmation tells you the file name, the folder, the size, and exactly what
+  went on the clipboard — with a **Show in Finder** button.
 
 Animated-WebP defaults: **12 fps, ≤ 15 s, long edge ≤ 1440 px, quality 80, loops forever, no audio.**
 
@@ -97,9 +101,10 @@ region of your screen** into `build/selftest/`, which is git-ignored.
 .build/debug/TriCap --render-ui-snapshots ./build/ui-snapshots
 ```
 
-Renders the real settings window, editor (still and clip), selection overlay, recording HUD and
-status-item icon offscreen to PNG. Useful for eyeballing the interface without a screen-recording
-tool.
+Renders the real settings tabs, the Getting Started window, the editor (still, clip and
+single-frame clip), both selection-overlay modes, the recording HUD and countdown, the post-export
+confirmation, and the status-item icon offscreen to PNG. Useful for eyeballing the interface
+without a screen-recording tool.
 
 ---
 
@@ -134,10 +139,41 @@ identity to avoid that. This repository does not sign, notarize or publish.
 
 ### Settings
 
-- **General** — global shortcut (click and press keys), permission status.
-- **Recording** — frame rate, maximum length, long-edge cap, countdown, WebP quality, loop.
+- **General** — global shortcut (click and press keys), recording countdown, permission status.
+- **Quality** — a named quality preset, the screenshot format, and an *Advanced* section with the
+  real encoder parameters. See [Quality](#quality) below.
 - **Output** — save folder, Markdown/Obsidian vault root, reference style (`![](path)` or
-  `![[path]]`), still format and quality, filename prefix, clipboard behaviour.
+  `![[path]]`), filename prefix, clipboard behaviour.
+- **About** — what TriCap is, and a way back to Getting Started.
+
+---
+
+## Quality
+
+Most people should pick a preset and never look further:
+
+| Preset | Screenshot quality | Recording longest edge | Recording frame rate | Animation quality |
+|---|---|---|---|---|
+| Smaller file | 65 | 960 px | 10 fps | 60 |
+| **Balanced** (default) | 85 | 1440 px | 12 fps | 80 |
+| Sharper | 95 | 1920 px | 15 fps | 90 |
+| Maximum | 100 | 3840 px | 20 fps | 95 |
+
+Every number is a real encoder argument, not a label — `QualityPresetTests` asserts the mapping.
+
+**What actually drives file size**, in order: resolution, then frame rate, then the quality
+factor. Halving the longest edge cuts a recording to roughly a quarter of its size; dropping the
+quality factor a few points is barely visible either way.
+
+**PNG has no quality setting** and TriCap does not pretend otherwise. PNG is lossless: the encoder
+takes no quality argument, so the Advanced section shows *Lossless — no setting* for PNG and a
+stepper for JPEG, WebP and Animated WebP. (`QualityParameterRealityTests` encodes the same image
+at quality 1 and 100 and asserts PNG's bytes are identical while the lossy formats' are not.)
+
+**Your own values are never overwritten.** Editing anything in Advanced switches the preset to
+**Custom** and keeps your numbers. Settings written by a build that had no presets load as Custom
+with every value preserved — TriCap will not silently change the quality you were already getting.
+Picking a preset is the only thing that writes those values.
 
 ### The clipboard reference
 

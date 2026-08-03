@@ -30,17 +30,10 @@ public final class SelectionOverlayView: NSView {
         didSet { if oldValue != selectionPixelSize { needsDisplay = true } }
     }
 
-    /// Short instruction shown while nothing is selected yet.
-    public var hintText: String = "Drag to select a region · Esc to cancel" {
-        didSet { if oldValue != hintText { needsDisplay = true } }
-    }
-
     /// Tints the selection border red so the mode is obvious before the user commits.
     public var isRecordingMode = false {
         didSet { if oldValue != isRecordingMode { needsDisplay = true } }
     }
-
-    private var isDragging = false
 
     public override init(frame frameRect: NSRect) { super.init(frame: frameRect) }
     public required init?(coder: NSCoder) { super.init(coder: coder) }
@@ -57,10 +50,12 @@ public final class SelectionOverlayView: NSView {
         context.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
         context.fill(bounds)
 
-        guard let selection = globalSelection else {
-            drawHint(in: context)
-            return
-        }
+        // The mode banner stays up for the whole drag. Previously the only cue that a drag was
+        // going to start a *recording* rather than take a screenshot was the border colour, and
+        // the explanatory line vanished the moment the mouse went down.
+        drawModeBanner(in: context)
+
+        guard let selection = globalSelection else { return }
 
         let local = convertFromGlobal(selection)
         let visible = local.intersection(bounds)
@@ -72,31 +67,115 @@ public final class SelectionOverlayView: NSView {
         context.fill(visible)
         context.setBlendMode(.normal)
 
-        context.setStrokeColor((isRecordingMode ? NSColor.systemRed : NSColor.controlAccentColor).cgColor)
+        context.setStrokeColor(accentColor.cgColor)
         // Hairline at the display's native resolution. Falls back to 1 pt when the view has no
         // window, which happens only in the offscreen UI-snapshot renderer.
         context.setLineWidth(1.0 / max(1, window?.backingScaleFactor ?? 1))
         context.stroke(visible.insetBy(dx: 0.5, dy: 0.5))
+        drawCorners(of: visible, in: context)
 
         drawReadout(near: visible, in: context)
+        drawReleaseHint(near: visible, in: context)
     }
 
-    private func drawHint(in context: CGContext) {
-        guard !isDragging else { return }
-        let text = hintText as NSString
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+    private var accentColor: NSColor {
+        isRecordingMode ? .systemRed : .controlAccentColor
+    }
+
+    /// `● Recording   R screenshot · Esc cancel` — pinned to the top of every display.
+    private func drawModeBanner(in context: CGContext) {
+        let title = isRecordingMode ? "Record a clip" : "Take a screenshot"
+        let hint = isRecordingMode ? "S  screenshot     Esc  cancel" : "R  record     Esc  cancel"
+
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
             .foregroundColor: NSColor.white,
         ]
-        let size = text.size(withAttributes: attributes)
-        let origin = CGPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2)
-        let padded = CGRect(origin: origin, size: size).insetBy(dx: -14, dy: -10)
+        let hintAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.75),
+        ]
 
-        context.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
-        let path = CGPath(roundedRect: padded, cornerWidth: 8, cornerHeight: 8, transform: nil)
-        context.addPath(path)
+        let titleSize = (title as NSString).size(withAttributes: titleAttributes)
+        let hintSize = (hint as NSString).size(withAttributes: hintAttributes)
+        let dotDiameter: CGFloat = 9
+        let gap: CGFloat = 14
+        let contentWidth = dotDiameter + 8 + titleSize.width + gap + hintSize.width
+        let contentHeight = max(titleSize.height, hintSize.height)
+
+        let banner = CGRect(
+            x: bounds.midX - contentWidth / 2 - 16,
+            y: bounds.maxY - contentHeight - 34,
+            width: contentWidth + 32,
+            height: contentHeight + 18
+        )
+        guard banner.minY > bounds.minY else { return }
+
+        context.setFillColor(NSColor.black.withAlphaComponent(0.72).cgColor)
+        context.addPath(CGPath(roundedRect: banner, cornerWidth: 9, cornerHeight: 9, transform: nil))
         context.fillPath()
 
+        let centreY = banner.midY
+        var x = banner.minX + 16
+
+        context.setFillColor(accentColor.cgColor)
+        context.fillEllipse(in: CGRect(
+            x: x, y: centreY - dotDiameter / 2, width: dotDiameter, height: dotDiameter
+        ))
+        x += dotDiameter + 8
+
+        (title as NSString).draw(
+            at: CGPoint(x: x, y: centreY - titleSize.height / 2), withAttributes: titleAttributes
+        )
+        x += titleSize.width + gap
+
+        (hint as NSString).draw(
+            at: CGPoint(x: x, y: centreY - hintSize.height / 2), withAttributes: hintAttributes
+        )
+    }
+
+    /// Short corner brackets, so the selection edges stay findable over busy content.
+    private func drawCorners(of rect: CGRect, in context: CGContext) {
+        let length = min(18, min(rect.width, rect.height) / 3)
+        guard length > 3 else { return }
+
+        context.setStrokeColor(accentColor.cgColor)
+        context.setLineWidth(2)
+        context.setLineCap(.square)
+        context.beginPath()
+        for corner in [
+            (CGPoint(x: rect.minX, y: rect.minY), CGFloat(1), CGFloat(1)),
+            (CGPoint(x: rect.maxX, y: rect.minY), CGFloat(-1), CGFloat(1)),
+            (CGPoint(x: rect.minX, y: rect.maxY), CGFloat(1), CGFloat(-1)),
+            (CGPoint(x: rect.maxX, y: rect.maxY), CGFloat(-1), CGFloat(-1)),
+        ] {
+            let (point, dx, dy) = corner
+            context.move(to: CGPoint(x: point.x + dx * length, y: point.y))
+            context.addLine(to: point)
+            context.addLine(to: CGPoint(x: point.x, y: point.y + dy * length))
+        }
+        context.strokePath()
+    }
+
+    /// Tells the user what happens when they let go — the one thing the overlay never said.
+    private func drawReleaseHint(near rect: CGRect, in context: CGContext) {
+        guard rect.width >= 90, rect.height >= 40 else { return }
+        let text = (isRecordingMode ? "Release to start recording" : "Release to capture") as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.9),
+        ]
+        let size = text.size(withAttributes: attributes)
+
+        // Below the selection when there is room, otherwise tucked inside its bottom edge.
+        var origin = CGPoint(x: rect.midX - size.width / 2, y: rect.minY - size.height - 12)
+        if origin.y < bounds.minY + 4 { origin.y = rect.minY + 8 }
+        origin.x = min(max(bounds.minX + 6, origin.x), bounds.maxX - size.width - 6)
+
+        let badge = CGRect(origin: origin, size: size).insetBy(dx: -8, dy: -4)
+        context.setFillColor(NSColor.black.withAlphaComponent(0.6).cgColor)
+        context.addPath(CGPath(roundedRect: badge, cornerWidth: 5, cornerHeight: 5, transform: nil))
+        context.fillPath()
         text.draw(at: origin, withAttributes: attributes)
     }
 
@@ -141,7 +220,6 @@ public final class SelectionOverlayView: NSView {
     // MARK: - Events
 
     override public func mouseDown(with event: NSEvent) {
-        isDragging = true
         delegate?.overlayDidBeginDrag(at: globalPoint(for: event))
     }
 
@@ -150,7 +228,6 @@ public final class SelectionOverlayView: NSView {
     }
 
     override public func mouseUp(with event: NSEvent) {
-        isDragging = false
         delegate?.overlayDidEndDrag(at: globalPoint(for: event))
     }
 

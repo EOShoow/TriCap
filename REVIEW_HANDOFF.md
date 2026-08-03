@@ -16,7 +16,69 @@ The working tree is left exactly as verified below.
 
 ---
 
-## 0. Review round 2 — what changed
+## 0. Round 3 — usability and quality
+
+Baseline `df0cacc`. This round is UI/UX, the settings model and tests; the capture, colour-space,
+concurrency and file-writing code reviewed in rounds 1–2 is untouched except where a UX fix needed
+a new read-only accessor.
+
+### UX problems found, and which were fixed
+
+| Pri | Problem | Fixed | Where |
+|---|---|---|---|
+| P0 | Nothing on first launch: no Dock icon, no window, no hint that permission is needed | ✅ | `WelcomeView`, shown once, reopenable |
+| P0 | A **Quality** control was offered for PNG, which ignores it entirely | ✅ | `OutputFormat.usesQualityParameter` |
+| P0 | After saving, nothing said where the file went or what was copied | ✅ | `ExportSummary` + toast with **Show in Finder** |
+| P0 | The menu bar looked identical whether or not TriCap could capture | ✅ | permission state + in-progress row |
+| P0 | The overlay's mode hint vanished on mouse-down; nothing said what release would do | ✅ | persistent banner, corner brackets, release hint |
+| P1 | Quality was raw encoder numbers with no result-oriented choice | ✅ | `QualityPreset` (4 presets + Custom) |
+| P1 | The recording HUD had no cancel affordance and no sense of the limit | ✅ | progress bar + `Esc cancels · Return stops` |
+| P1 | Tool glyphs unlabelled, no shortcuts | ✅ | active-tool name, `⌘1`–`⌘5`, real tooltips |
+| P1 | Settings mixed limits with quality, always showed every parameter | ✅ | four tabs, conditional Advanced |
+| P1 | The editor never showed the save destination | ✅ | `Saves to …` + **Show in Finder** |
+| P2 | No annotation selection/move after drawing | ❌ deferred | out of scope: needs hit-testing and handles |
+| P2 | No in-editor animation preview (the Frame slider scrubs instead) | ❌ deferred | |
+| P2 | No capture history / recents | ❌ deferred | explicitly out of scope |
+| P2 | Onboarding is static text, not an interactive walkthrough | ❌ deferred | |
+
+### The quality rules
+
+| Preset | Still quality | Recording long edge | Recording fps | Animation quality |
+|---|---|---|---|---|
+| Smaller file | 65 | 960 | 10 | 60 |
+| **Balanced** (default) | 85 | 1440 | 12 | 80 |
+| Sharper | 95 | 1920 | 15 | 90 |
+| Maximum | 100 | 3840 | 20 | 95 |
+
+Three invariants, each with a test:
+
+1. **The controls map to real encoder arguments.** `QualityPresetApplicationTests` asserts each
+   preset writes `stillQuality`, `recordingLimits.maxLongEdgePixels`, `recordingLimits.frameRate`
+   and `animatedWebPOptions.quality` — the four values that reach `StillImageCodec.encode`,
+   `SCStreamConfiguration` and `WebPConfig`.
+2. **PNG never shows a quality control.** `QualityParameterRealityTests` encodes the same detailed
+   image at quality 1 and 100: PNG's bytes are byte-identical, JPEG's and WebP's are not.
+3. **Custom values are never overwritten.** Editing any advanced value re-derives the label as
+   `.custom`; applying `.custom` is a no-op; a settings blob with no `qualityPreset` key loads as
+   `.custom` with every stored number preserved. The old default still quality was 90, which
+   matches no preset — snapping it to one would have silently changed existing users' output.
+
+The animated-WebP quality assertion deliberately checks that the bytes **differ**, not that they
+shrink monotonically: TriCap encodes animations with `allow_mixed`, so libwebp may pick a lossless
+frame at a high quality factor and produce a *smaller* file than a lossy frame at a low one. Size
+monotonicity is asserted for the still formats, where no such mode switch happens.
+
+### A bug found while writing the migration tests
+
+`RecordingLimits` and `AnimatedWebPOptions` conformed to `Codable` synthetically, so decoding
+assigned their stored properties directly and skipped their own clamping initializers. A corrupt
+or future settings blob could therefore load `frameRate: 999`, `maxLongEdgePixels: 99999` — values
+the UI cannot represent and the capture path was never designed for. Both now decode through the
+clamping initializer.
+
+---
+
+## 0.1 Review round 2 — what changed
 
 Every item was reproduced in the code before being changed; none was taken on trust.
 
@@ -109,8 +171,8 @@ swift build -c release
 ```
 
 ```
-Debug   → Build complete! (36.83s)
-Release → Build complete! (36.00s)
+Debug   → Build complete! (36.21s)
+Release → Build complete! (36.57s)
 ```
 
 Zero warnings, zero errors (`swift build 2>&1 | grep -c "warning:"` → `0`).
@@ -154,7 +216,31 @@ Required coverage, mapped:
 .build/debug/TriCap --selftest ./build/selftest
 ```
 
-Run with `caffeinate -dimsu` — see §4.6 for why. Abridged output from the last Release run:
+Run with `caffeinate -dimsu` — see §4.6 for why. **This round the display was compositing live,
+so nothing was skipped: `ALL CHECKS PASSED`.** Key lines from the last Release run:
+
+```
+  PASS  SCShareableContent reachable  — 1 display(s), 13 app(s)
+  PASS  SCScreenshotManager capture  — 800x600
+  PASS  recording finishes with at least one frame  — 80 frames, 6.73 s, 15713 KB retained
+  PASS  recording captured the on-screen motion as multiple frames  — 80 frames    <- not skipped
+  PASS  colour-space outcome survived teardown
+  PASS  animated WebP written  — clip.webp 45560 bytes
+  PASS  stored frame count is within the submitted count  — 64 stored of 76 submitted
+  PASS  total playback duration is preserved  — 6400 ms vs 6400 ms
+  PASS  loop count is 0 (infinite)
+  PASS  fixed overlay present on every frame  — sampled (40,20) in all 64 frames
+  PASS  the ceiling fired although no frame ever passed it  — last frame at 0.00 s, ceiling 3 s
+  PASS  static clip reports the real recorded length  — 1 frame(s), reported duration 2.99 s
+  PASS  a bare Escape can be claimed system-wide without Accessibility
+  PASS  EditorModel deallocated after close
+  PASS  editor NSWindow deallocated after close
+
+== Summary
+  ALL CHECKS PASSED
+```
+
+The round-2 transcript below is kept for comparison:
 
 ```
 TriCap self-test
@@ -335,12 +421,17 @@ Six PNGs in `build/ui-snapshots/`, all inspected:
 | File | Shows |
 |---|---|
 | `01-settings-general.png` | Settings → General: shortcut recorder reading `⌥⇧5`, explanatory text, permission row (`Granted` + "Open System Settings") |
-| `02-editor-still.png` | Still editor: 5-tool picker, 6-colour palette, stroke slider, undo/redo/clear, canvas with arrow + rectangle + text + mosaic composited, `940 × 620 px`, Format picker (PNG), Close/Save |
+| `02-editor-still.png` | Still editor: 5 tool buttons with the active one highlighted **and named** ("Arrow"), 6-colour palette, stroke slider, undo/redo/clear, composited annotations, `940 × 620 px`, Format PNG **· Lossless**, `Saves to ~/Pictures/TriCap`, Close/Save |
 | `03-editor-clip-trim.png` | Clip editor: mosaic tool selected with its block-size slider, `8 of 12 frames · 0.7 s`, Reset trim, Start=2 / End=9 / Frame=5 sliders, `640 × 400 px  Animated WebP` |
-| `04-selection-overlay.png` | Selection overlay: dimmed desktop, punched-out bright selection, **red** border (recording mode), `940 × 520 px` badge |
-| `05-recording-hud.png` | Recording HUD: red dot, `4.2 s / 15 s`, `51 frames · 12 MB`, Stop button — now rendered in dark appearance so the label is legible (B9) |
+| `04-selection-overlay.png` | Selection overlay in recording mode: persistent banner "● Record a clip   S screenshot   Esc cancel", punched-out selection with red corner brackets, `940 × 520 px` badge, "Release to start recording" |
+| `05-recording-hud.png` | Recording HUD, now rendered by `RecordingHUD.populateHUD` itself rather than a hand-built copy: `4.2 s / 15 s`, `51 frames · 12 MB`, progress bar toward the limit, **`Esc cancels · Return stops`**, Stop button in dark appearance |
 | `06-menu-bar-item.png` | Status-item template icon at menu-bar size |
-| `07-editor-single-frame-clip.png` | **New in round 2 (B10).** A one-frame clip: `1 of 1 frames · 0.1 s`, *Reset trim* disabled, "Single frame — nothing to trim.", and **no** Start/End/Frame sliders |
+| `07-editor-single-frame-clip.png` | **Round 2 (B10).** A one-frame clip: `1 of 1 frames · 0.1 s`, *Reset trim* disabled, "Single frame — nothing to trim.", and **no** Start/End/Frame sliders |
+| `08-settings-quality.png` | **Round 3.** Quality tab, Advanced expanded: preset *Balanced* with its summary, format PNG with "Lossless — every pixel is preserved exactly", **PNG quality → "Lossless — no setting"** (no stepper), the four recording parameters, and the size-guidance footer |
+| `09-welcome.png` | **Round 3.** Getting Started: "TriCap is running", the three numbered steps, *Ask macOS now* for the not-determined permission state |
+| `10-export-toast.png` | **Round 3.** Post-export confirmation: file name, `~/Documents/Vault/assets · 1.4 MB`, "Copied the Markdown reference", **Show in Finder** |
+| `11-selection-overlay-screenshot.png` | **Round 3.** Screenshot mode: blue banner "● Take a screenshot   R record   Esc cancel", corner brackets, "Release to capture" |
+| `12-recording-countdown.png` | **Round 3.** Countdown: `3`, "Recording starts…", "Esc to cancel" |
 
 **These are offscreen renders of the real view hierarchies** (`NSHostingView` / `SelectionOverlayView`
 in off-screen windows, captured via `CALayer.render(in:)`), not desktop captures — see §4.1 for why,
@@ -458,6 +549,31 @@ from the documented behaviour of those filesystems, not from observation here.
 reports case-*insensitive*. The comparison rule is tested directly as a pure function over path
 components, and `volumeCaseSensitivity(for:)` is tested to agree with whatever this volume reports.
 A case-sensitive APFS volume would exercise the other branch end to end.
+
+### 4.7 Round-3-specific gaps
+
+Screen automation is still declined, so every round-3 UI change is evidenced by an **offscreen
+render of the real view** (§3.7), not by a desktop screenshot. What that leaves unverified:
+
+| Change | Not verified | How to check by hand |
+|---|---|---|
+| First-run welcome | That the window actually *appears* on a real first launch. The flag flips (`app.tricap.hasSeenWelcome` went from absent to `1` on launch, so `showWelcome()` ran) and the view renders offscreen — but nobody watched it open. The flag was reset afterwards so the next launch still shows it. | `defaults delete app.tricap.TriCap app.tricap.hasSeenWelcome`, then relaunch |
+| Menu-bar states | The dropdown itself is never rendered — only the window server can draw an `NSMenu`. Permission rows, *Capture in progress…*, and *Getting Started…* are unverified visually. | Deny permission and open the menu; start a recording and open the menu |
+| Export toast | That the panel positions correctly under the menu bar, auto-dismisses after 6 s, and that **Show in Finder** reveals the file | Save a capture and watch the top-right corner |
+| Tool shortcuts | That `⌘1`–`⌘5` actually switch tools in a focused editor window | Open the editor and press them |
+| Overlay banner | That the banner stays legible over real desktop content on a Retina display, and that it does not obscure content at the top of the screen | Press `⌥⇧5` and drag near the top edge |
+| Quality presets end to end | That picking a preset visibly changes a *real* capture's file size. The mapping to encoder arguments is asserted, and the encoders' response to quality is asserted, but the two were not chained through a live capture. | Save the same region at *Smaller file* and at *Maximum*, compare sizes |
+| Countdown panel | That it appears centred on the selection and that `Esc` cancels during it | Set a 3 s countdown and start a recording |
+
+**The preset numbers are a judgement call.** They were chosen to span TriCap's existing ranges
+sensibly (960/1440/1920/3840 px, 10/12/15/20 fps) and are monotonic on every axis, which the tests
+assert — but they are not calibrated against measured file sizes for typical screen content. If a
+reviewer thinks *Balanced* should be 1080 px rather than 1440 px, that is a product decision, not
+a defect, and it is a one-line change in `QualityPreset.values`.
+
+**Existing users all land on Custom.** That is deliberate (see §0), but it means nobody upgrading
+sees a preset selected until they pick one. The alternative — snapping their values to the nearest
+preset — would change their output quality without asking.
 
 ### 4.5 Other gaps
 

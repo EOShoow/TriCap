@@ -2,6 +2,7 @@ import AnnotationCore
 import AppKit
 import CaptureCore
 import CoreGraphics
+import ExportCore
 import Foundation
 import SelectionUI
 import SwiftUI
@@ -43,8 +44,36 @@ enum UISnapshotRenderer {
         let store = SettingsStore(defaults: snapshotDefaults())
 
         try write(
-            hosting(SettingsView(store: store), size: CGSize(width: 520, height: 430)),
+            hosting(SettingsView(store: store), size: CGSize(width: 540, height: 470)),
             to: directory.appendingPathComponent("01-settings-general.png")
+        )
+
+        // The quality tab with its advanced section open, which is the whole point of the
+        // preset/advanced split. `stillFormat` is PNG here, so no fake Quality stepper appears.
+        try write(
+            hosting(
+                SettingsQualityPreview(store: store, expandAdvanced: true),
+                size: CGSize(width: 540, height: 700)
+            ),
+            to: directory.appendingPathComponent("08-settings-quality.png")
+        )
+
+        try write(
+            hosting(
+                WelcomeView(
+                    shortcut: store.settings.hotKey,
+                    permissionStatus: .notDetermined,
+                    onGrantPermission: {}, onOpenSystemSettings: {},
+                    onTryCapture: {}, onOpenSettings: {}, onDismiss: {}
+                ),
+                size: CGSize(width: 460, height: 470)
+            ),
+            to: directory.appendingPathComponent("09-welcome.png")
+        )
+
+        try write(
+            hosting(exportToastPreview(), size: CGSize(width: 400, height: 140)),
+            to: directory.appendingPathComponent("10-export-toast.png")
         )
 
         let still = syntheticStill()
@@ -101,6 +130,11 @@ enum UISnapshotRenderer {
         )
 
         try write(selectionOverlaySnapshot(), to: directory.appendingPathComponent("04-selection-overlay.png"))
+        try write(
+            selectionOverlaySnapshot(recording: false),
+            to: directory.appendingPathComponent("11-selection-overlay-screenshot.png")
+        )
+        try write(countdownSnapshot(), to: directory.appendingPathComponent("12-recording-countdown.png"))
         try write(recordingHUDSnapshot(), to: directory.appendingPathComponent("05-recording-hud.png"))
         try write(menuBarSnapshot(), to: directory.appendingPathComponent("06-menu-bar-item.png"))
     }
@@ -108,14 +142,13 @@ enum UISnapshotRenderer {
     // MARK: - Individual snapshots
 
     /// The real ``SelectionOverlayView`` with a live selection, over a synthetic desktop.
-    private static func selectionOverlaySnapshot() throws -> NSBitmapImageRep {
+    private static func selectionOverlaySnapshot(recording: Bool = true) throws -> NSBitmapImageRep {
         let size = CGSize(width: 900, height: 560)
         let container = offscreenContainer(size: size)
         let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
 
         let overlay = SelectionOverlayView(frame: container.bounds)
-        overlay.hintText = RegionSelector.CaptureMode.recording.hint
-        overlay.isRecordingMode = true
+        overlay.isRecordingMode = recording
         container.addSubview(overlay)
 
         // The overlay interprets its selection in AppKit *global* points and converts through its
@@ -134,41 +167,73 @@ enum UISnapshotRenderer {
         return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
     }
 
-    /// A stand-in for the floating recording HUD, built from the same pieces the live HUD uses.
+    /// The *real* recording HUD, populated by `RecordingHUD` itself.
     private static func recordingHUDSnapshot() throws -> NSBitmapImageRep {
-        let size = CGSize(width: 268, height: 56)
-        let content = offscreenContainer(size: size)
+        let content = offscreenContainer(size: RecordingHUD.hudSize)
         content.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
         content.layer?.cornerRadius = 12
-        // Matches the live HUD: dark-mode controls on a dark panel.
         content.appearance = NSAppearance(named: .darkAqua)
 
-        let dot = NSView(frame: CGRect(x: 16, y: 24, width: 10, height: 10))
-        dot.wantsLayer = true
-        dot.layer?.backgroundColor = NSColor.systemRed.cgColor
-        dot.layer?.cornerRadius = 5
-        content.addSubview(dot)
-
-        let elapsed = NSTextField(labelWithString: "4.2 s / 15 s")
-        elapsed.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        elapsed.textColor = .white
-        elapsed.frame = CGRect(x: 34, y: 28, width: 150, height: 20)
-        content.addSubview(elapsed)
-
-        let frames = NSTextField(labelWithString: "51 frames · 12 MB")
-        frames.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        frames.textColor = NSColor.white.withAlphaComponent(0.7)
-        frames.frame = CGRect(x: 34, y: 10, width: 150, height: 16)
-        content.addSubview(frames)
-
-        let stop = NSButton(title: "Stop", target: nil, action: nil)
-        stop.bezelStyle = .rounded
-        stop.contentTintColor = .white
-        stop.frame = CGRect(x: 196, y: 14, width: 58, height: 28)
-        content.addSubview(stop)
+        let hud = RecordingHUD()
+        hud.populateHUD(content, onStop: {})
+        hud.update(
+            progress: RecordingProgress(frameCount: 51, elapsed: 4.2, retainedBytes: 12 * 1_048_576),
+            limits: RecordingLimits(frameRate: 12, maxDuration: 15)
+        )
+        snapshotHUDs.append(hud)
 
         settle(content)
         return try bitmap(of: content)
+    }
+
+    /// Keeps the snapshot HUD alive until its bitmap has been taken.
+    private static var snapshotHUDs: [RecordingHUD] = []
+
+    /// The live recording HUD's countdown panel.
+    private static func countdownSnapshot() throws -> NSBitmapImageRep {
+        let size = CGSize(width: 180, height: 176)
+        let content = offscreenContainer(size: size)
+        content.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        content.layer?.cornerRadius = 12
+        content.appearance = NSAppearance(named: .darkAqua)
+
+        let number = NSTextField(labelWithString: "3")
+        number.font = .systemFont(ofSize: 84, weight: .semibold)
+        number.textColor = .white
+        number.alignment = .center
+        number.frame = CGRect(x: 0, y: 52, width: 180, height: 100)
+        content.addSubview(number)
+
+        let caption = NSTextField(labelWithString: "Recording starts…")
+        caption.font = .systemFont(ofSize: 12, weight: .medium)
+        caption.textColor = NSColor.white.withAlphaComponent(0.85)
+        caption.alignment = .center
+        caption.frame = CGRect(x: 0, y: 32, width: 180, height: 18)
+        content.addSubview(caption)
+
+        let hint = NSTextField(labelWithString: "Esc to cancel")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = NSColor.white.withAlphaComponent(0.6)
+        hint.alignment = .center
+        hint.frame = CGRect(x: 0, y: 14, width: 180, height: 16)
+        content.addSubview(hint)
+
+        settle(content)
+        return try bitmap(of: content)
+    }
+
+    /// The post-export confirmation, with the wording the tests assert.
+    private static func exportToastPreview() -> some View {
+        ExportToastPreview(
+            summary: ExportSummary(
+                fileName: "TriCap-2026-08-03-141530.webp",
+                folderDisplayPath: "~/Documents/Vault/assets",
+                sizeDescription: "1.4 MB",
+                detailDescription: "1440 × 900 · Animated WebP · 52 frames · 4.7 s",
+                clipboardDescription: "Copied the Markdown reference",
+                warning: nil
+            )
+        )
     }
 
     /// The status item's template image at menu-bar size, on a menu-bar-like strip.

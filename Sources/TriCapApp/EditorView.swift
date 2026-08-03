@@ -26,17 +26,38 @@ struct EditorView: View {
 
     private var toolbar: some View {
         HStack(spacing: 14) {
-            Picker("", selection: $model.tool) {
+            HStack(spacing: 2) {
                 ForEach(AnnotationTool.allCases) { tool in
-                    Label(tool.displayName, systemImage: tool.symbolName)
-                        .labelStyle(.iconOnly)
-                        .tag(tool)
+                    Button {
+                        model.tool = tool
+                    } label: {
+                        Image(systemName: tool.symbolName)
+                            .frame(width: 26, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(model.tool == tool ? Color.accentColor : .clear)
+                    )
+                    .foregroundStyle(model.tool == tool ? Color.white : Color.primary)
+                    .help(tool.toolTip)
+                    .keyboardShortcut(
+                        KeyEquivalent(Character("\(tool.shortcutNumber)")),
+                        modifiers: .command
+                    )
+                    .accessibilityLabel(tool.displayName)
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 220)
-            .help("Annotation tool")
+            .padding(2)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.secondary.opacity(0.12))
+            )
+
+            // Naming the active tool removes the guesswork from a row of glyphs.
+            Text(model.tool.displayName)
+                .font(.callout.weight(.medium))
+                .frame(width: 74, alignment: .leading)
 
             colorSwatches
 
@@ -242,17 +263,28 @@ struct EditorView: View {
                             Text(format.displayName).tag(format)
                         }
                     }
-                    .frame(width: 170)
+                    .frame(width: 165)
+                    .help(model.format.qualityExplanation)
                 } else {
                     Label("Animated WebP", systemImage: "square.stack.3d.down.right")
                         .foregroundStyle(.secondary)
                 }
+
+                // Say what the chosen format will actually do, instead of leaving the user to
+                // guess whether a quality setting is even in play.
+                Text(model.qualityDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Spacer()
 
                 if model.isExporting {
                     ProgressView(value: model.exportProgress)
                         .frame(width: 120)
+                }
+
+                if model.savedFileURL != nil {
+                    Button("Show in Finder") { model.revealSavedFile() }
                 }
 
                 Button("Close") { model.close() }
@@ -262,6 +294,13 @@ struct EditorView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(model.isExporting)
             }
+
+            // Where the file will land, before the user commits to saving.
+            Text("Saves to \(model.saveDirectoryDisplayPath)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.head)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

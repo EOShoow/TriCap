@@ -1,22 +1,42 @@
 import AppKit
 import CaptureCore
+import ExportCore
 import SwiftUI
 import TriCapKit
 
 /// The settings window.
+///
+/// Four tabs, each answering one question: *how do I start a capture*, *how good should it look*,
+/// *where does it go*, and *what is this*. Quality is its own tab because it is the only area with
+/// a real information hierarchy — a named choice most people never look past, and the encoder
+/// parameters behind it for the people who do.
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     @State private var hotKeyCapture = false
     @State private var hotKeyError: String?
+    @State private var showAdvancedQuality: Bool
+
+    /// Injected by the app so the About tab can reopen the welcome window.
+    var onShowWelcome: (() -> Void)?
+
+    init(
+        store: SettingsStore,
+        onShowWelcome: (() -> Void)? = nil,
+        initiallyExpandAdvancedQuality: Bool = false
+    ) {
+        self.store = store
+        self.onShowWelcome = onShowWelcome
+        _showAdvancedQuality = State(initialValue: initiallyExpandAdvancedQuality)
+    }
 
     var body: some View {
         TabView {
             generalTab.tabItem { Label("General", systemImage: "gearshape") }
-            recordingTab.tabItem { Label("Recording", systemImage: "record.circle") }
+            qualityTab.tabItem { Label("Quality", systemImage: "dial.high") }
             outputTab.tabItem { Label("Output", systemImage: "square.and.arrow.down") }
             aboutTab.tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 520, height: 430)
+        .frame(width: 540, height: 470)
     }
 
     // MARK: - General
@@ -36,11 +56,25 @@ struct SettingsView: View {
                 if let hotKeyError {
                     Text(hotKeyError).font(.caption).foregroundStyle(.red)
                 }
-                Text("Opens the region picker. Press R in the picker to record instead, S to go back to a screenshot, Esc to cancel.")
+                Text("Press it anywhere to pick a region. In the picker: **R** switches to recording, **S** back to a screenshot, **Esc** cancels.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Global shortcut")
+            }
+
+            Section {
+                LabeledContent("Countdown before recording") {
+                    Stepper(
+                        store.settings.countdownSeconds == 0 ? "Off" : "\(store.settings.countdownSeconds) s",
+                        value: $store.settings.countdownSeconds,
+                        in: AppSettings.countdownRange
+                    )
+                }
+                Text("Gives you time to get the window ready. **Esc** cancels during the countdown and during the recording itself, even while another app is in front.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("Recording")
             }
 
             Section {
@@ -55,93 +89,172 @@ struct SettingsView: View {
 
     private var permissionRow: some View {
         let status = ScreenRecordingPermission.authorizationStatus()
-        return HStack(alignment: .top) {
-            switch status {
-            case .authorized:
-                Label("Granted", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-            case .denied:
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("Denied", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
-                    Text("macOS will not ask again. Enable TriCap in System Settings, then relaunch it.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            case .notDetermined:
-                VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                switch status {
+                case .authorized:
+                    Label("Granted", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                case .denied:
+                    Label("Turned off", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                case .notDetermined:
                     Label("Not requested yet", systemImage: "questionmark.circle").foregroundStyle(.orange)
-                    Text("TriCap asks the first time you capture.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
+                Spacer()
+                Button("Open System Settings") { ScreenRecordingPermission.openSystemSettings() }
             }
-            Spacer()
-            Button("Open System Settings") { ScreenRecordingPermission.openSystemSettings() }
+            Text(permissionExplanation(for: status))
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    // MARK: - Recording
+    private func permissionExplanation(for status: ScreenRecordingAuthorization) -> String {
+        switch status {
+        case .authorized:
+            return "TriCap can capture the screen. Nothing is uploaded — every capture stays on this Mac."
+        case .denied:
+            return "macOS will not ask again. Enable TriCap under Privacy & Security → Screen & System Audio Recording, then quit and reopen TriCap."
+        case .notDetermined:
+            return "macOS will ask the first time you capture. TriCap cannot see anything until you allow it."
+        }
+    }
 
-    private var recordingTab: some View {
+    // MARK: - Quality
+
+    private var qualityPresetBinding: Binding<QualityPreset> {
+        Binding(
+            get: { store.settings.qualityPreset },
+            set: { store.settings.applyQualityPreset($0) }
+        )
+    }
+
+    var qualityTab: some View {
         Form {
             Section {
-                LabeledContent("Frame rate") {
-                    Stepper(
-                        "\(store.settings.recordingLimits.frameRate) fps",
-                        value: $store.settings.recordingLimits.frameRate,
-                        in: RecordingLimits.frameRateRange
-                    )
+                Picker("Quality", selection: qualityPresetBinding) {
+                    ForEach(QualityPreset.selectable) { preset in
+                        Text(preset.displayName).tag(preset)
+                    }
+                    if store.settings.qualityPreset == .custom {
+                        Divider()
+                        Text(QualityPreset.custom.displayName).tag(QualityPreset.custom)
+                    }
                 }
-                LabeledContent("Maximum length") {
-                    Stepper(
-                        "\(Int(store.settings.recordingLimits.maxDuration)) s",
-                        value: Binding(
-                            get: { Int(store.settings.recordingLimits.maxDuration) },
-                            set: { store.settings.recordingLimits.maxDuration = TimeInterval($0) }
-                        ),
-                        in: Int(RecordingLimits.durationRange.lowerBound)...Int(RecordingLimits.durationRange.upperBound)
-                    )
-                }
-                LabeledContent("Longest edge") {
-                    Stepper(
-                        "\(store.settings.recordingLimits.maxLongEdgePixels) px",
-                        value: $store.settings.recordingLimits.maxLongEdgePixels,
-                        in: RecordingLimits.longEdgeRange,
-                        step: 80
-                    )
-                }
-                LabeledContent("Countdown") {
-                    Stepper(
-                        store.settings.countdownSeconds == 0 ? "Off" : "\(store.settings.countdownSeconds) s",
-                        value: $store.settings.countdownSeconds,
-                        in: AppSettings.countdownRange
-                    )
-                }
-                Text("At \(store.settings.recordingLimits.frameRate) fps for \(Int(store.settings.recordingLimits.maxDuration)) s TriCap holds at most \(store.settings.recordingLimits.maxFrameCount) frames, capped at \(store.settings.recordingLimits.maxFrameBufferBytes / 1_048_576) MB.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(store.settings.qualityPreset.summary)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
-                Text("Limits")
+                Text("How good should captures look?")
             }
 
             Section {
-                LabeledContent("Quality") {
-                    Stepper(
-                        "\(store.settings.animatedWebPOptions.quality)",
-                        value: $store.settings.animatedWebPOptions.quality,
-                        in: AnimatedWebPOptions.qualityRange,
-                        step: 5
-                    )
+                Picker("Screenshot format", selection: $store.settings.stillFormat) {
+                    ForEach([OutputFormat.png, .jpeg, .webp], id: \.self) { format in
+                        Text(format.displayName).tag(format)
+                    }
                 }
-                Toggle("Loop forever", isOn: Binding(
-                    get: { store.settings.animatedWebPOptions.loopCount == 0 },
-                    set: { store.settings.animatedWebPOptions.loopCount = $0 ? 0 : 1 }
-                ))
-                Text("Animated WebP only. TriCap never records audio.")
+                Text(store.settings.stillFormat.qualityExplanation)
                     .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
-                Text("Animated WebP")
+                Text("Screenshots")
+            }
+
+            Section {
+                DisclosureGroup("Advanced encoder settings", isExpanded: $showAdvancedQuality) {
+                    // Only the parameters that actually do something for the chosen format.
+                    if store.settings.stillFormat.usesQualityParameter {
+                        LabeledContent("\(store.settings.stillFormat.displayName) quality") {
+                            Stepper(
+                                "\(store.settings.stillQuality)",
+                                value: $store.settings.stillQuality,
+                                in: 0...100,
+                                step: 5
+                            )
+                        }
+                    } else {
+                        LabeledContent("\(store.settings.stillFormat.displayName) quality") {
+                            Text("Lossless — no setting")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Divider()
+
+                    LabeledContent("Recording longest edge") {
+                        Stepper(
+                            "\(store.settings.recordingLimits.maxLongEdgePixels) px",
+                            value: $store.settings.recordingLimits.maxLongEdgePixels,
+                            in: RecordingLimits.longEdgeRange,
+                            step: 80
+                        )
+                    }
+                    LabeledContent("Recording frame rate") {
+                        Stepper(
+                            "\(store.settings.recordingLimits.frameRate) fps",
+                            value: $store.settings.recordingLimits.frameRate,
+                            in: RecordingLimits.frameRateRange
+                        )
+                    }
+                    LabeledContent("Maximum recording length") {
+                        Stepper(
+                            "\(Int(store.settings.recordingLimits.maxDuration)) s",
+                            value: Binding(
+                                get: { Int(store.settings.recordingLimits.maxDuration) },
+                                set: { store.settings.recordingLimits.maxDuration = TimeInterval($0) }
+                            ),
+                            in: Int(RecordingLimits.durationRange.lowerBound)...Int(RecordingLimits.durationRange.upperBound)
+                        )
+                    }
+                    LabeledContent("Animated WebP quality") {
+                        Stepper(
+                            "\(store.settings.animatedWebPOptions.quality)",
+                            value: $store.settings.animatedWebPOptions.quality,
+                            in: AnimatedWebPOptions.qualityRange,
+                            step: 5
+                        )
+                    }
+                    Toggle("Loop the animation forever", isOn: Binding(
+                        get: { store.settings.animatedWebPOptions.loopCount == 0 },
+                        set: { store.settings.animatedWebPOptions.loopCount = $0 ? 0 : 1 }
+                    ))
+
+                    Text("Changing any of these switches the preset above to **Custom**. Nothing you set here is ever overwritten by a preset unless you pick one.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                Text("Advanced")
+            } footer: {
+                markdown(sizeGuidance)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)
         .padding(.top, 8)
+    }
+
+    /// `Text` from a runtime-built Markdown string.
+    ///
+    /// `Text("literal **bold**")` parses Markdown because the literal becomes a
+    /// `LocalizedStringKey`; a `String` built at runtime does not, and renders the asterisks.
+    private func markdown(_ string: String) -> Text {
+        Text((try? AttributedString(markdown: string)) ?? AttributedString(string))
+    }
+
+    /// Plain-language explanation of the three levers, plus the current budget.
+    private var sizeGuidance: String {
+        let limits = store.settings.recordingLimits
+        return """
+        What drives file size, in order: **resolution** (a recording capped at \
+        \(limits.maxLongEdgePixels) px on its longest edge), then **frame rate** \
+        (\(limits.frameRate) per second), then **quality**. Halving the longest edge cuts a \
+        recording to roughly a quarter; dropping the quality factor a few points barely shows. \
+        At these settings TriCap holds at most \(limits.maxFrameCount) frames, capped at \
+        \(limits.maxFrameBufferBytes / 1_048_576) MB, for up to \(Int(limits.maxDuration)) s. \
+        TriCap never records audio.
+        """
     }
 
     // MARK: - Output
@@ -155,8 +268,19 @@ struct SettingsView: View {
                     onPick: { url in store.settings.saveDirectoryPath = url.path },
                     onClear: nil
                 )
+                HStack {
+                    Spacer()
+                    Button("Open Folder") {
+                        store.prepareSaveDirectory()
+                        NSWorkspace.shared.open(store.settings.saveDirectoryURL)
+                    }
+                }
+                TextField("Filename starts with", text: $store.settings.filenamePrefix)
+                markdown("Files are named `\(OutputFileWriterPreview.example(prefix: store.settings.filenamePrefix, format: store.settings.stillFormat))`. An existing name is never overwritten — TriCap adds `-1`, `-2`, and so on.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
-                Text("Location")
+                Text("Where captures go")
             }
 
             Section {
@@ -171,31 +295,21 @@ struct SettingsView: View {
                         Text(style.displayName).tag(style)
                     }
                 }
-                Text("Files saved inside the vault get a relative reference on the clipboard. Anything outside it gets the absolute file path instead.")
+                Text("Save inside the vault and TriCap copies a **relative** reference you can paste straight into a note. Save anywhere else and it copies the **full file path** instead, because a relative link would not resolve.")
                     .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Text("Markdown / Obsidian")
             }
 
             Section {
-                Picker("Screenshot format", selection: $store.settings.stillFormat) {
-                    ForEach([OutputFormat.png, .jpeg, .webp], id: \.self) { format in
-                        Text(format.displayName).tag(format)
-                    }
-                }
-                LabeledContent("Quality") {
-                    Stepper(
-                        "\(store.settings.stillQuality)",
-                        value: $store.settings.stillQuality,
-                        in: 0...100,
-                        step: 5
-                    )
-                }
-                TextField("Filename prefix", text: $store.settings.filenamePrefix)
-                Toggle("Copy reference after saving", isOn: $store.settings.copyReferenceAfterExport)
+                Toggle("Copy the reference after saving", isOn: $store.settings.copyReferenceAfterExport)
                 Toggle("Also copy the image itself", isOn: $store.settings.copyImageAfterExport)
+                Text("With both on, the clipboard holds the image *and* the text reference; apps take whichever they understand.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
-                Text("Files")
+                Text("Clipboard")
             }
         }
         .formStyle(.grouped)
@@ -248,11 +362,26 @@ struct SettingsView: View {
             Spacer()
 
             HStack {
+                if let onShowWelcome {
+                    Button("Show Getting Started…", action: onShowWelcome)
+                }
                 Spacer()
                 Button("Reset all settings") { store.resetToDefaults() }
             }
         }
         .padding(20)
+    }
+}
+
+/// Builds the example filename shown in the Output tab, using the same rules as the real writer.
+enum OutputFileWriterPreview {
+    static func example(prefix: String, format: OutputFormat) -> String {
+        let base = OutputFileWriter.baseName(
+            prefix: prefix,
+            date: Date(timeIntervalSince1970: 1_754_200_530),
+            timeZone: TimeZone(identifier: "UTC") ?? .current
+        )
+        return "\(base).\(format.fileExtension)"
     }
 }
 

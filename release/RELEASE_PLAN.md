@@ -47,15 +47,25 @@ macOS 26.5.2 (build 25F84), Apple Silicon arm64, Swift 6.3.3, two displays
   --deep --strict`).
 - `package-release.sh --local-test`: DMG builds, mounts, contains TriCap.app +
   `/Applications` symlink, app inside verifies.
-- `package-release.sh` (release mode) **fails closed, now proven under injected failures**
-  (`scripts/diagnostics/package-release-gate-probe.sh`, no Developer ID required): the official
+- `package-release.sh` (release mode) **fails closed, proven under injected failures**
+  (`scripts/diagnostics/package-release-gate-probe.sh`, no Developer ID required — and the probe
+  itself runs against an **isolated dist directory from mktemp**, fingerprinting the real
+  build/dist before and after and failing unless it is byte-identical): the official
   `TriCap-<version>.dmg` name exists only after notarization is literally `Accepted` (JSON,
   machine-parsed), the staple validates and `spctl` passes on the mounted app — until then the
-  artefact lives under a temporary name in a per-run temp directory. Verdicts of *rejected*,
-  *command failure*, *unparsable output*, *staple failure*, *spctl rejection*, *SIGTERM
-  mid-upload* and *target already exists* each exit non-zero with no officially named file, no
-  temp residue, no lingering mount, and pre-existing dist files byte-identical. The probe also
-  caught (and the fix removed) a trap that reported exit 0 after SIGTERM.
+  artefact lives under a temporary name in a per-run temp directory, and the final name is
+  claimed with a **hard link whose EEXIST is kernel-atomic** (no check-then-move window).
+  Ten scenarios, three consecutive full runs, all green: notary *rejected* / *command failure* /
+  *unparsable output*, *staple failure*, *spctl rejection*, *SIGTERM mid-upload*,
+  *target already exists*, **all-success stubs** (the test-mode hard barrier: even fully faked
+  verdicts can only mint `…-TEST-PROBE.dmg`, never the official name, never the release banner),
+  a **two-run race** for one target (exactly one winner in either ordering; the loser exits
+  non-zero; the winner's inode and hash never change), and the real `--local-test` build.
+  The probe has now caught three real defects across its life: a trap that reported exit 0
+  after SIGTERM; a mount-table check that never matched because /sbin/mount prints
+  /private/var/… where $TMPDIR says /var/…; and a `detach`/`rm` race with macOS's asynchronous
+  unmount that could strand an undeletable mountpoint — all fixed, with detaches now polling
+  the mount table by physical path until the volume is truly gone.
 
 ## Not yet verified
 

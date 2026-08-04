@@ -33,6 +33,52 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.000000 Round 8c — Codex round 2: probe isolation, test-mode barrier, precise residue checks, atomic claim
+
+All four findings were valid; each is fixed with the failure mode reproduced or exercised.
+
+**P1-A — the probe wrote into the real `build/dist`.** True, and dangerous: it seeded
+`TriCap-0.0.9.dmg` and created/deleted `TriCap-0.1.0.dmg` at real paths. Now
+`TRICAP_DIST_OVERRIDE` relocates the dist directory **only when `TRICAP_PACKAGE_TEST=1`** — a
+normal run ignores the override unconditionally and always uses the real `build/dist`. The probe
+creates its whole workspace with `mktemp` outside the repository; every sentinel, seeded target,
+injected failure and local-test product lives there. The real `build/dist` is fingerprinted
+(file list + SHA-256) before the first scenario and after the last, and the probe fails on any
+difference — verified additionally by an *independent* fingerprint taken by the invoking shell
+around the probe: byte-identical across all runs, with a real artefact present in the directory
+the whole time.
+
+**P1-B — all-success stubs could mint a release.** Correct. Test mode now has a hard barrier in
+the promotion path itself: a `TRICAP_PACKAGE_TEST=1` run can only claim
+`TriCap-<version>-TEST-PROBE.dmg`, never the official name, and never prints the
+`RELEASE PRODUCT` banner (a structural assertion refuses promotion if the name is not
+TEST-PROBE-suffixed, independent of how the name was computed). New `all-success-barrier`
+scenario proves it: stubs all green → exit 0, TEST-PROBE artefact only, official name absent,
+"RELEASE PRODUCT" absent from the log.
+
+**P2-C — the mount-residue assertion never matched.** Correct, and the root cause bit the
+*product script* too: `/sbin/mount` prints `/private/var/…` while `$TMPDIR` paths read `/var/…`,
+so the script's own "is it mounted?" check silently never matched, the detach was skipped, and
+`rm -rf` clawed at a live read-only volume — reproduced with a stranded, undeletable mountpoint.
+Fixes: the script now detaches unconditionally and **synchronously** (`detach_mountpoint` polls
+the mount table by physical path until the volume is gone — `hdiutil detach` returning is not
+the same as the unmount having completed, also observed); the probe checks residue by physical
+workspace-path prefix in both the mount table and `hdiutil info` image paths, per scenario and
+in a final global sweep. Never by volume name.
+
+**P2-D — TOCTOU between the exists-check and `mv`.** Correct. Promotion now claims the final
+name with `ln` — hard-link creation whose `EEXIST` failure is atomic in the kernel — then removes
+the temp link; there is no check-then-move window and no reliance on `mv -n`. The
+`concurrent-claim` scenario races two full packaging runs at one target with assertions that are
+deliberately order-independent (either run may win — both orderings were observed across three
+probe runs): exactly one exit 0, the loser logs the claim refusal, and the winner's file —
+hashed and inode-recorded the moment it first appears — is never replaced.
+
+Probe totals: **10 scenarios, 67 checks, three consecutive full runs green**, no mounts and no
+workspaces left behind, real `build/dist` byte-identical throughout. Still true and restated:
+the Developer ID / real-notarization happy path has never run on any machine; public release
+remains **BLOCKED** (release/RELEASE_PLAN.md).
+
 ## 0.00000 Round 8b — Codex P1: the packaging script could strand an official-looking DMG
 
 The finding was correct: the previous script created `build/dist/TriCap-<version>.dmg` at its

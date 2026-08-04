@@ -22,8 +22,9 @@
 #   - The DMG is built under a unique temporary directory inside build/dist and carries a
 #     temporary name. The official TriCap-<version>.dmg path does not exist until notarization
 #     has come back "Accepted", the staple has validated, and Gatekeeper has assessed the app
-#     inside the mounted image. Only then is the file renamed into place — one atomic rename on
-#     the same volume.
+#     inside the mounted image. Only then is the name claimed — with a hard link, whose EEXIST
+#     failure is kernel-atomic, so no exists-check-then-move window exists and concurrent runs
+#     cannot overwrite each other.
 #   - An EXIT/INT/TERM trap detaches any volume this run mounted and deletes this run's
 #     temporary directory, on every failure, signal and normal path. Nothing else in build/dist
 #     is ever touched: earlier release products and unrelated files survive every outcome.
@@ -40,11 +41,16 @@
 # and referenced here only by its NAME via TRICAP_NOTARY_PROFILE. Do not paste passwords, API
 # keys or team IDs into this script, its arguments, or CI logs.
 #
-# Test seams: the external verdict tools can be overridden for the failure-injection probe
-# (scripts/diagnostics/package-release-gate-probe.sh), and ONLY when TRICAP_PACKAGE_TEST=1 is
-# also set. Without that flag the overrides are ignored and the absolute system paths are used,
-# so a poisoned PATH cannot substitute the real tools. Running the harness with all-success
-# stubs would be operator fraud, not a script defect — the probe injects failures only.
+# Test seams (all honoured ONLY when TRICAP_PACKAGE_TEST=1; ignored otherwise):
+#   - the external verdict tools can be overridden by the gate probe
+#     (scripts/diagnostics/package-release-gate-probe.sh); without the flag the absolute system
+#     paths are used, so a poisoned PATH cannot substitute the real tools;
+#   - TRICAP_DIST_OVERRIDE relocates build/dist into the probe's isolated directory, so the
+#     probe can never touch real products; normal runs always use the real build/dist.
+# Test mode also has a HARD BARRIER on the official name: even if every stub reports success,
+# a TRICAP_PACKAGE_TEST=1 run can only ever produce TriCap-<version>-TEST-PROBE.dmg and never
+# prints "RELEASE PRODUCT". Faked verdicts therefore cannot manufacture anything that could be
+# mistaken for a distributable artefact.
 #
 set -euo pipefail
 
@@ -60,13 +66,15 @@ elif [[ -n "${1:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------- tools (absolute; test seam)
+TEST_MODE=0
 if [[ "${TRICAP_PACKAGE_TEST:-}" == "1" ]]; then
+  TEST_MODE=1
   SECURITY_BIN="${TRICAP_SECURITY:-/usr/bin/security}"
   CODESIGN_BIN="${TRICAP_CODESIGN:-/usr/bin/codesign}"
   SPCTL_BIN="${TRICAP_SPCTL:-/usr/sbin/spctl}"
   read -r -a NOTARY_CMD <<< "${TRICAP_NOTARYTOOL:-xcrun notarytool}"
   read -r -a STAPLE_CMD <<< "${TRICAP_STAPLER:-xcrun stapler}"
-  echo "NOTE: TRICAP_PACKAGE_TEST=1 — tool overrides are honoured; any artefact from this run is a test artefact." >&2
+  echo "NOTE: TRICAP_PACKAGE_TEST=1 — tool overrides are honoured; this run can only produce TEST-PROBE artefacts." >&2
 else
   SECURITY_BIN="/usr/bin/security"
   CODESIGN_BIN="/usr/bin/codesign"
@@ -76,7 +84,14 @@ else
 fi
 
 VERSION="$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)"
-DIST="$ROOT/build/dist"
+# The dist directory is overridable ONLY in test mode, so the gate probe can run every scenario
+# inside an isolated throwaway directory. A normal run ignores the override unconditionally:
+# real products always live in the real build/dist, and nothing a caller exports can move them.
+if [[ "$TEST_MODE" == "1" && -n "${TRICAP_DIST_OVERRIDE:-}" ]]; then
+  DIST="$TRICAP_DIST_OVERRIDE"
+else
+  DIST="$ROOT/build/dist"
+fi
 APP_SRC="$ROOT/build/release/TriCap.app"
 
 fail() { echo "!! $1" >&2; exit 1; }
@@ -87,12 +102,37 @@ fail() { echo "!! $1" >&2; exit 1; }
 # about the rest of build/dist.
 TMP_ROOT=""
 MOUNTPOINT=""
+
+# Detach a mountpoint and only return once the kernel agrees it is gone. `hdiutil detach` can
+# report success while the unmount is still completing, and a `rm -rf` racing that window
+# deletes the backing image out from under a live volume and leaves an undeletable mountpoint
+# behind — observed, not theorised. The mount table is compared by PHYSICAL path, because it
+# prints /private/var/... where $TMPDIR says /var/... .
+detach_mountpoint() { # <mountpoint> — returns 0 once unmounted
+  local mp="$1" phys i
+  phys="$(cd "$mp" 2>/dev/null && pwd -P)" || phys="$mp"
+  for i in 1 2 3 4 5 6 8 10; do
+    /sbin/mount | grep -Fq " $phys " || return 0
+    if [[ "$i" -le 2 ]]; then
+      hdiutil detach -quiet "$mp" 2>/dev/null || true
+    else
+      hdiutil detach -quiet -force "$mp" 2>/dev/null || true
+    fi
+    sleep 0.4
+  done
+  ! /sbin/mount | grep -Fq " $phys "
+}
+
 release_resources() {
-  if [[ -n "$MOUNTPOINT" ]] && /sbin/mount | grep -Fq " $MOUNTPOINT "; then
-    hdiutil detach -quiet -force "$MOUNTPOINT" 2>/dev/null || true
+  # Detach unconditionally when a mountpoint was assigned (an earlier version consulted the
+  # mount table with the symlinked /var path, never matched, skipped the detach, and rm -rf
+  # clawed at a live read-only volume). detach_mountpoint blocks until the volume is truly
+  # gone, so the rm below cannot race the unmount.
+  if [[ -n "$MOUNTPOINT" ]]; then
+    detach_mountpoint "$MOUNTPOINT" || true
   fi
   if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" ]]; then
-    rm -rf "$TMP_ROOT"
+    rm -rf "$TMP_ROOT" 2>/dev/null || { sleep 1; rm -rf "$TMP_ROOT" 2>/dev/null || true; }
   fi
 }
 on_exit() {
@@ -134,12 +174,19 @@ if [[ "$MODE" == "release" ]]; then
    Create one interactively with: xcrun notarytool store-credentials <name>
    and pass the NAME only. This script never handles the credentials themselves."
 
-  FINAL_DMG="$DIST/TriCap-$VERSION.dmg"
+  OFFICIAL_DMG="$DIST/TriCap-$VERSION.dmg"
   # Refuse to shadow a file that may already have shipped. Deleting or replacing a published
-  # artefact is a human decision, not a packaging side effect.
-  [[ -e "$FINAL_DMG" ]] && fail "$FINAL_DMG already exists.
+  # artefact is a human decision, not a packaging side effect. Checked in test mode too, so the
+  # refusal logic itself stays testable.
+  [[ -e "$OFFICIAL_DMG" ]] && fail "$OFFICIAL_DMG already exists.
    Refusing to overwrite a previously produced release artefact. Move it away deliberately
    (or bump CFBundleShortVersionString) and re-run."
+  if [[ "$TEST_MODE" == "1" ]]; then
+    # HARD BARRIER: a test-mode run never owns the official name, no matter what the stubs said.
+    FINAL_DMG="$DIST/TriCap-$VERSION-TEST-PROBE.dmg"
+  else
+    FINAL_DMG="$OFFICIAL_DMG"
+  fi
 else
   FINAL_DMG="$DIST/TriCap-$VERSION-LOCAL-TEST-adhoc.dmg"
 fi
@@ -197,20 +244,40 @@ if [[ "$MODE" == "release" ]]; then
   hdiutil attach -quiet -nobrowse -mountpoint "$MOUNTPOINT" "$TMP_DMG"
   "$SPCTL_BIN" --assess --type execute --verbose=2 "$MOUNTPOINT/TriCap.app" \
     || fail "spctl rejected the app; do not distribute."
-  hdiutil detach -quiet "$MOUNTPOINT"
+  detach_mountpoint "$MOUNTPOINT" || fail "could not unmount the assessment volume."
   MOUNTPOINT=""
 fi
 
-# ---------------------------------------------------------------- promote (atomic, same volume)
+# ---------------------------------------------------------------- promote (kernel-atomic claim)
+# `ln` creates a hard link and fails with EEXIST atomically in the kernel — unlike an exists
+# check followed by `mv`, which a concurrent run can slip between (TOCTOU), and unlike `mv -n`,
+# whose no-clobber is a userspace pre-check. TMP_ROOT lives under $DIST, so source and target
+# are always on one volume. Exactly one of any number of racing runs can win the name; every
+# loser exits non-zero and its temp artefact is removed by the trap.
+claim_exclusively() { # <src> <dst>
+  if ! ln "$1" "$2" 2>/dev/null; then
+    fail "could not claim $2 — it already exists (another run may have produced it). Refusing to overwrite."
+  fi
+  rm -f -- "$1"
+}
+
 if [[ "$MODE" == "release" ]]; then
-  # Re-check: a parallel run may have produced it while this one worked.
-  [[ -e "$FINAL_DMG" ]] && fail "$FINAL_DMG appeared while packaging; refusing to overwrite it."
-  mv "$TMP_DMG" "$FINAL_DMG"
-  echo "==> RELEASE PRODUCT: $FINAL_DMG"
+  if [[ "$TEST_MODE" == "1" ]]; then
+    # Structural barrier, not just naming: this branch cannot mint the official name or the
+    # release banner even if a future edit breaks the FINAL_DMG assignment above.
+    [[ "$FINAL_DMG" == *"-TEST-PROBE.dmg" ]] \
+      || fail "test mode attempted to promote to a non-TEST-PROBE name; refusing."
+    claim_exclusively "$TMP_DMG" "$FINAL_DMG"
+    echo "==> TEST-PROBE PRODUCT (stubbed verdicts, NOT a release, do not distribute): $FINAL_DMG"
+  else
+    claim_exclusively "$TMP_DMG" "$FINAL_DMG"
+    echo "==> RELEASE PRODUCT: $FINAL_DMG"
+  fi
 else
-  # A local-test artefact may replace an older local-test artefact — never anything else.
-  rm -f "$FINAL_DMG"
-  mv "$TMP_DMG" "$FINAL_DMG"
+  # A local-test artefact may replace an older local-test artefact — never anything else. The
+  # claim is still exclusive; only this run's own stale product is cleared first.
+  rm -f -- "$FINAL_DMG"
+  claim_exclusively "$TMP_DMG" "$FINAL_DMG"
   cat <<EOF
 ==> LOCAL TEST PRODUCT: $FINAL_DMG
     Ad-hoc signature, arm64 only, NOT notarized. Gatekeeper on any other machine will

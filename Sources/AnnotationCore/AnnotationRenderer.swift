@@ -1,5 +1,7 @@
 import AppKit
 import CoreGraphics
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreText
 import Foundation
 import TriCapKit
@@ -152,38 +154,85 @@ public enum AnnotationRenderer {
         }
     }
 
-    /// Pixelate a region by downsampling it and drawing it back with nearest-neighbour sampling.
+    /// One `CIContext` for every mosaic ever drawn.
+    ///
+    /// Creating a context per frame would rebuild the GPU pipeline 181 times per animated export;
+    /// `CIContext` is documented immutable and thread-safe, so a single shared instance serves the
+    /// still path (main thread) and animated-frame compositing (detached task) simultaneously —
+    /// pinned by the concurrent-render test. `CIFilter` instances are *not* thread-safe and are
+    /// created per call, which is cheap.
+    ///
+    /// Working and output space are both sRGB, matching the renderer's canvas, so no conversion
+    /// sneaks in between the snapshot and the redraw.
+    private static let mosaicContext: CIContext = {
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        return CIContext(options: [
+            .workingColorSpace: srgb,
+            .outputColorSpace: srgb,
+            .cacheIntermediates: false,
+        ])
+    }()
+
+    /// Pixelate a region with Core Image's `CIPixellate`.
+    ///
+    /// This replaced a hand-written crop→downscale→nearest-neighbour-upscale implementation whose
+    /// crop rect was double-flipped — `CGImage.cropping(to:)` already works in row space, where an
+    /// annotation-space rect needs no conversion — so it pixelated the **vertically mirrored**
+    /// band. Over a mostly-light page that painted large white blocks unrelated to the covered
+    /// content. `scripts/diagnostics/mosaic-mirror-probe.swift` reproduces the defect standalone;
+    /// `MosaicTests` pins the fix.
+    ///
+    /// Geometry notes, all pinned by tests:
+    /// - `CIImage` coordinates are bottom-left-origin, so the annotation-space rect converts once,
+    ///   explicitly, into `ciRect`.
+    /// - The input is clamped to its extent before filtering so edge blocks sample real pixels
+    ///   rather than the transparent void beyond the image — no dark or hollow fringes.
+    /// - The pixel grid is anchored to the canvas's top-left corner, not to the rect, so dragging
+    ///   or trimming the region never makes the grid crawl.
+    ///
+    /// This is visual obscuration, **not** security-grade redaction: a pixelated block is a
+    /// deterministic function of the pixels beneath it. For secrets, cover with a filled
+    /// rectangle instead.
     private static func drawMosaic(_ rect: CGRect, style: AnnotationStyle, in ctx: CGContext, canvasSize: CGSize) {
         let r = rect.standardized.integralOutward
             .intersection(CGRect(origin: .zero, size: canvasSize))
-        guard !r.isNull, r.width >= 2, r.height >= 2 else { return }
+        guard !r.isNull, r.width >= 1, r.height >= 1 else { return }
 
-        // `makeImage()` snapshots the context in *context* space (bottom-left origin), so the
-        // crop rect has to be un-flipped first.
+        // Snapshot the whole canvas: the mosaic must sample the base image *and* every annotation
+        // drawn before it, or redacting on top of a highlight would not redact the highlight.
         guard let snapshot = ctx.makeImage() else { return }
-        let flipped = CGRect(
-            x: r.origin.x,
-            y: canvasSize.height - r.origin.y - r.height,
-            width: r.width,
-            height: r.height
-        ).integralOutward.intersection(CGRect(x: 0, y: 0, width: snapshot.width, height: snapshot.height))
-        guard !flipped.isNull, let region = snapshot.cropping(to: flipped) else { return }
 
-        let block = max(2, style.mosaicBlockSize)
-        let smallW = max(1, Int((r.width / block).rounded(.down)))
-        let smallH = max(1, Int((r.height / block).rounded(.down)))
-        guard let smallCtx = ImageProcessing.makeContext(width: smallW, height: smallH) else { return }
-        smallCtx.interpolationQuality = .medium
-        smallCtx.draw(region, in: CGRect(x: 0, y: 0, width: smallW, height: smallH))
-        guard let small = smallCtx.makeImage() else { return }
+        let filter = CIFilter.pixellate()
+        filter.inputImage = CIImage(cgImage: snapshot).clampedToExtent()
+        filter.scale = Float(max(2, style.mosaicBlockSize))
+        // Canvas top-left in Core Image's bottom-left-origin space: the grid anchor. (Pixellate
+        // samples each block at its centre, with blocks tiled from `center` — probed empirically,
+        // see the placement tests.)
+        filter.center = CGPoint(x: 0, y: canvasSize.height)
+
+        // Render the WHOLE pixellated canvas and cut the band afterwards, in CGImage row space —
+        // where the annotation-space rect needs no conversion at all. Cropping the *CIImage*
+        // output to the band instead returned wrong pixels whenever a block's centre sample point
+        // fell outside the crop (probed: a 100-px block cropped at x ≥ 60 came back with the
+        // neighbouring block's colour), and a band crop excludes sample points routinely once the
+        // block size approaches the band size.
+        let fullExtent = CGRect(origin: .zero, size: canvasSize)
+        guard let output = filter.outputImage?.cropped(to: fullExtent),
+              let fullPixelated = mosaicContext.createCGImage(
+                  output,
+                  from: fullExtent,
+                  format: .RGBA8,
+                  colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+              ),
+              let pixelated = fullPixelated.cropping(to: r) else { return }
 
         ctx.saveGState()
         ctx.interpolationQuality = .none
-        // Undo the outer flip for this one draw: `ctx.draw` would otherwise paint the
-        // downsampled tile upside-down inside the mosaic rect.
+        // Undo the outer flip for this one draw: `ctx.draw` would otherwise paint the pixelated
+        // tile upside-down inside the mosaic rect.
         ctx.translateBy(x: r.midX, y: r.midY)
         ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(small, in: CGRect(x: -r.width / 2, y: -r.height / 2, width: r.width, height: r.height))
+        ctx.draw(pixelated, in: CGRect(x: -r.width / 2, y: -r.height / 2, width: r.width, height: r.height))
         ctx.restoreGState()
     }
 }

@@ -292,24 +292,28 @@ struct AnnotationRendererTests {
 
     @Test("Mosaic redacts an annotation drawn underneath it, not just the base image")
     func mosaicCoversEarlierAnnotations() throws {
+        // `CIPixellate` *samples* one point per block (the hand-written predecessor averaged the
+        // block, which is what this test originally relied on). So the proof is arranged around
+        // sampling: one 100-px block spans the whole canvas and its sample point lands inside the
+        // black stripe — which is an *annotation*, not part of the white base. The mosaic'd area
+        // over the white half can therefore only come out black if the filter saw the composited
+        // canvas, annotations included.
         var filled = AnnotationStyle(color: .black)
         filled.filled = true
         let stripe = AnnotationItem(shape: .rectangle(CGRect(x: 0, y: 0, width: 60, height: 100)), style: filled)
 
-        // One 60x60 block covers the whole mosaic rect, so the black half and the white half
-        // average into a single mid tone: neither side can still be pure.
         var mosaicStyle = AnnotationStyle()
-        mosaicStyle.mosaicBlockSize = 60
-        let mosaic = AnnotationItem(shape: .mosaic(CGRect(x: 30, y: 0, width: 60, height: 100)), style: mosaicStyle)
+        mosaicStyle.mosaicBlockSize = 100
+        let mosaic = AnnotationItem(shape: .mosaic(CGRect(x: 60, y: 0, width: 40, height: 100)), style: mosaicStyle)
 
         let withoutMosaic = try #require(AnnotationRenderer.render(items: [stripe], onto: Self.baseImage()))
         #expect(Self.pixel(withoutMosaic, x: 35, y: 50) == (0, 0, 0))
         #expect(Self.pixel(withoutMosaic, x: 80, y: 50) == (255, 255, 255))
 
         let out = try #require(AnnotationRenderer.render(items: [stripe, mosaic], onto: Self.baseImage()))
-        // The black rectangle underneath is an *annotation*, not part of the base image, so these
-        // assertions only hold if the mosaic sampled the composited canvas.
-        #expect(Self.pixel(out, x: 35, y: 50) != (0, 0, 0))
+        // Outside the mosaic rect the stripe is untouched.
+        #expect(Self.pixel(out, x: 35, y: 50) == (0, 0, 0))
+        // Inside it, the formerly white pixels take the block's sampled colour: the black stripe.
         #expect(Self.pixel(out, x: 80, y: 50) != (255, 255, 255))
     }
 

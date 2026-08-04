@@ -216,6 +216,25 @@ Measured at 1440×900, 181 frames (15 s at 12 fps), median of three, recording p
 frame interval: **177.0 s → 11.3 s** from the strategy change alone, **→ 0.85 s** with pre-encoding.
 Worst frame lateness 0.2 ms and no dropped frames in any arm.
 
+## The mosaic is Core Image, and what it is not
+
+`AnnotationRenderer.drawMosaic` uses `CIPixellate` through one shared `CIContext` (documented
+immutable and thread-safe; filters are created per call). It replaced a hand-written
+crop→downscale→upscale implementation whose crop rect was double-flipped — `CGImage.cropping(to:)`
+already works in row space — so it pixelated the **vertically mirrored** band and, over a light
+page, painted white blocks unrelated to the covered content.
+`scripts/diagnostics/mosaic-mirror-probe.swift` reproduces the defect standalone; `MosaicTests`
+pins the fix, including canvas-anchored grid (no drift when the rect moves), edge clamping (no
+hollow fringes), untouched pixels outside the rect, and byte-identical output across concurrent
+renders. One render path serves the editor preview, every still format and every animated frame;
+measured cost on a real capture is ~3 ms per frame, which is why no GPU framework dependency was
+added.
+
+**Boundary:** pixelation is visual obscuration, not security-grade redaction — a pixelated block
+is a deterministic function of the pixels beneath it, and low block counts over known fonts can be
+reconstructed. For credentials or keys, the honest tool is a filled rectangle. TriCap's copy says
+"pixelate", never "blur", and never claims irreversibility.
+
 ## Quality presets
 
 `QualityPreset` (in `TriCapKit`) names an outcome — *Smaller file*, *Balanced*, *Sharper*,

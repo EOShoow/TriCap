@@ -158,6 +158,13 @@ enum UISnapshotRenderer {
             bannerOverlapSnapshot(kind: .selectionThroughBanner),
             to: directory.appendingPathComponent("17-banner-over-selection.png")
         )
+        // Mosaic before/after on the fixture that exposed the old defect: dark text rows near the
+        // top of a light page. The old implementation sampled the vertically mirrored band and
+        // painted white blocks here; the pixelated band must visibly derive from the covered rows.
+        try write(
+            mosaicBeforeAfterSnapshot(),
+            to: directory.appendingPathComponent("18-mosaic-before-after.png")
+        )
         // Where the chrome lands for a near-full-screen recording — the case that used to put the
         // Stop button off the top of the display.
         try write(
@@ -198,6 +205,60 @@ enum UISnapshotRenderer {
     }
 
     /// The overlay with a window highlighted under the pointer and no drag in progress.
+    /// Original next to mosaic'd, on content shaped like the report: dark "text" near the top of
+    /// a light page, with a bright band at the vertically mirrored position that the old
+    /// implementation would have sampled instead.
+    private static func mosaicBeforeAfterSnapshot() throws -> NSBitmapImageRep {
+        let width = 420
+        let height = 300
+
+        func fixture() -> CGImage {
+            let ctx = ImageProcessing.makeContext(width: width, height: height)!
+            // Light page.
+            ctx.setFillColor(CGColor(srgbRed: 0.97, green: 0.97, blue: 0.95, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            // Dark text-like rows near the TOP (context space: high y).
+            ctx.setFillColor(CGColor(srgbRed: 0.15, green: 0.17, blue: 0.22, alpha: 1))
+            for (row, widths) in [(252, [70, 40, 90, 55]), (232, [50, 85, 35, 70]), (212, [95, 45, 60, 40])] {
+                var x = 24
+                for w in widths {
+                    ctx.fill(CGRect(x: x, y: row, width: w, height: 11))
+                    x += w + 14
+                }
+            }
+            // A saturated band at the mirrored position — what the old code wrongly sampled.
+            ctx.setFillColor(CGColor(srgbRed: 0.98, green: 0.62, blue: 0.15, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 30, width: width, height: 50))
+            return ctx.makeImage()!
+        }
+
+        let base = fixture()
+        let mosaic = AnnotationItem(
+            shape: .mosaic(CGRect(x: 16, y: 30, width: width - 32, height: 72)),   // the text rows
+            style: AnnotationStyle(mosaicBlockSize: 14)
+        )
+        guard let after = AnnotationRenderer.render(items: [mosaic], onto: base) else {
+            throw TriCapError.encodingFailed("mosaic snapshot render failed")
+        }
+
+        // Side by side with a caption strip.
+        let pad = 16
+        let captionHeight = 34
+        let sheetWidth = width * 2 + pad * 3
+        let sheetHeight = height + pad * 2 + captionHeight
+        let sheet = ImageProcessing.makeContext(width: sheetWidth, height: sheetHeight)!
+        sheet.setFillColor(CGColor(srgbRed: 0.13, green: 0.13, blue: 0.14, alpha: 1))
+        sheet.fill(CGRect(x: 0, y: 0, width: sheetWidth, height: sheetHeight))
+        sheet.draw(base, in: CGRect(x: pad, y: pad, width: width, height: height))
+        sheet.draw(after, in: CGRect(x: pad * 2 + width, y: pad, width: width, height: height))
+        guard let composite = sheet.makeImage() else {
+            throw TriCapError.encodingFailed("mosaic snapshot composite failed")
+        }
+        let rep = NSBitmapImageRep(cgImage: composite)
+        rep.size = NSSize(width: sheetWidth, height: sheetHeight)
+        return rep
+    }
+
     /// The overlap regressions: content drawn with `.copy` blending crossing the mode banner.
     private enum BannerOverlap {
         case fullScreenHighlight

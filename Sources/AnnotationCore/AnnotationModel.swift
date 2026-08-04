@@ -39,7 +39,10 @@ public enum AnnotationTool: String, Codable, CaseIterable, Sendable, Identifiabl
         case .rectangle: return "Rectangle — box something off (\u{2318}2)"
         case .text: return "Text — click, then type (\u{2318}3)"
         case .freehand: return "Pen — draw freehand (\u{2318}4)"
-        case .mosaic: return "Mosaic — blur out anything private (\u{2318}5)"
+        // "Pixelate", not "blur": the effect is a block mosaic, and calling it a blur promises a
+        // different look. It is visual obscuration, not irreversible redaction — for secrets a
+        // filled rectangle is the honest tool.
+        case .mosaic: return "Mosaic — pixelate anything private (\u{2318}5)"
         }
     }
 

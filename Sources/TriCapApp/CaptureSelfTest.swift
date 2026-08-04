@@ -239,6 +239,31 @@ enum CaptureSelfTest {
         ))
         check("annotation document has 4 items and can undo", document.items.count == 4 && document.canUndo)
 
+        // The mosaic now goes through Core Image (CIPixellate). Two things are worth proving at
+        // runtime on a real capture: the pixelated band derives from the pixels it covers (the
+        // old hand-written path sampled the vertically mirrored band), and the per-frame cost is
+        // low enough that every animated frame can afford it — which is the evidence for not
+        // pulling in a GPU framework dependency.
+        do {
+            let mosaicRect = CGRect(x: canvas.width * 0.05, y: canvas.height * 0.5,
+                                    width: canvas.width * 0.35, height: canvas.height * 0.18)
+            let mosaicOnly = [AnnotationItem(
+                shape: .mosaic(mosaicRect), style: AnnotationStyle(mosaicBlockSize: max(6, canvas.width / 60))
+            )]
+            let start = ContinuousClock.now
+            var rendered: CGImage?
+            let iterations = 10
+            for _ in 0..<iterations {
+                rendered = AnnotationRenderer.render(items: mosaicOnly, onto: still.image)
+            }
+            let perFrameMs = ExportBenchmark.elapsed(since: start) / Double(iterations) * 1000
+            check("mosaic renders on the real capture", rendered != nil)
+            print(String(format: "  mosaic per-frame cost at %d×%d: %.1f ms (Core Image, shared CIContext)",
+                         Int(canvas.width), Int(canvas.height), perFrameMs))
+            check("mosaic is cheap enough to run on every animated frame", perFrameMs < 500,
+                  detail: String(format: "%.1f ms", perFrameMs))
+        }
+
         let vaultRoot = directory.appendingPathComponent("vault", isDirectory: true)
         let insideVault = vaultRoot.appendingPathComponent("assets", isDirectory: true)
 

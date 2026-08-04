@@ -33,6 +33,76 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.0000 Round 8 — banner layering, system mosaic, login item, release boundary
+
+Four commits on `6eaa9bd`, in review order: `d912523` (A), `6e23723` (B), `a713ccb` (C), and the
+docs/packaging commit (D). Every fix was reproduced before it was made, and both P0 regressions
+have tests that demonstrably fail on the old code.
+
+### A. The banner was erased by `.copy` blending — `d912523`
+
+Verified first: `draw(_:)` painted the banner, then the selection punch-out (`.copy` + clear) and
+the window highlight (`.copy` + 12% black) replaced every overlapping pixel. The failing tests
+measured exactly that: banner-centre alpha **0.0** under a selection, **0.121** under a highlight.
+Draw order was the whole fix — banner last, same overlay, no new window. 10 tests (7 fail on the
+old order) including Retina 2× and recording mode, plus counter-tests proving the punch-out still
+punches and the highlight still lifts. Snapshots `16`/`17` show both overlaps; the banner cannot
+reach a capture because the overlay is `sharingType=.none`, dismissed before stills, and the SCK
+filter excludes TriCap.
+
+### B. The mosaic sampled the mirrored band — `6e23723`
+
+`scripts/diagnostics/mosaic-mirror-probe.swift` reproduced it before any change: pixelating the
+red top half of a red/blue fixture returned **blue** — the hand-written crop was double-flipped
+(`CGImage.cropping` already works in row space). On a light page that imports white blocks from
+the mirrored position: the reported symptom, reproduced byte-for-byte (`r=255` in the failing
+test). The old grid was also rect-anchored (drift when the rect moves; 130 pixel mismatches in
+the failing grid test).
+
+Replaced with `CIFilter.pixellate()` — zero new dependencies, one shared sRGB `CIContext`,
+clamped input, canvas-anchored grid. Two empirical findings worth a reviewer's attention, both
+probed and pinned:
+
+- pixellate samples each block at its **centre**, blocks tiled from `center`;
+- cropping the **CIImage output** to the band returns wrong pixels whenever a block's centre
+  falls outside the crop (probed with block 100 / crop at x≥60, which came back with the
+  neighbouring block's colour — caught by a pre-existing test). The fix renders the full canvas
+  and cuts the band in CGImage row space.
+
+Semantic note, stated rather than hidden: the old code *averaged* each block; `CIPixellate`
+*samples* it. The legacy test that encoded averaging was reworked to prove the same property
+(mosaic samples the composited canvas, annotations included) under sampling semantics.
+Measured cost 3.2 ms/frame on a real capture (selftest prints it). Snapshot `18` is the
+before/after on report-shaped content.
+
+### C. Launch at login — `a713ccb`
+
+`SMAppService.mainApp` only; the system's status is the single truth (no Bool in AppSettings,
+status re-read on pane appearance and after every action). Pure mapping/decision rules live in
+TriCapKit with 8 tests; register/unregister idempotent; errors shown inline, never as success;
+`requiresApproval` shows the toggle on with a warning and an `openSystemSettingsLoginItems()`
+button. Snapshots `01` (notRegistered) and `19` (requiresApproval) with injected fake backends —
+the snapshot process is a bare binary whose real status would be machine-dependent `notFound`.
+
+### D. Release boundary
+
+`release/RELEASE_PLAN.md` (status: **BLOCKED**, with the exact blockers),
+`release/RELEASE_TEMPLATE.md` (Minimum requirement separated from Verified environments),
+`scripts/package-release.sh` (DMG with drag-to-install layout; Developer ID + Hardened Runtime +
+timestamp + notarytool + staple when an identity exists; **fail-closed** otherwise, with an
+explicit `--local-test` mode producing `TriCap-<v>-LOCAL-TEST-adhoc.dmg`). Exercised on this
+machine: both refusal gates, and the local-test DMG (mounts, contains the app + `/Applications`
+symlink, app verifies). The notarized happy path has never run here — 0 signing identities.
+
+### 4.11 Round-8-specific gaps
+
+| Change | Not verified | How to check by hand |
+|---|---|---|
+| Banner layering | Only offscreen renders and bitmap sampling; nobody hovered a real full-screen window on a real overlay. Multi-display is covered by the "selection covers the whole view" case + per-display banner drawing, not by a live two-screen drag | Press ⌥⇧5, hover a maximised window, drag through the top of the screen |
+| Mosaic | No human has drawn a mosaic in the live editor this round; visual evidence is snapshots 02/18. The user's original screenshot was not available as a fixture — the synthetic one matches the reported geometry (light page, dark rows, bright mirrored band) | Annotate a real screenshot over light content and export every format |
+| Login item | **No real logout/login was performed** (would destroy this session). Real `register()` success needs a properly installed bundle: from a bare build directory the system reports `notFound` by design. The `.enabled`/`.requiresApproval` paths were exercised only through the injected fake | Install to /Applications, toggle on, approve if asked, log out and back in |
+| Release packaging | The Developer ID / notarization / staple / spctl path has never run (no identity on this machine). Only the fail-closed gates and the local-test product are exercised | Run release mode on a machine with a Developer ID identity |
+
 ## 0.000 Round 7 — HUD placement and export performance
 
 Two independent problems. Both were reproduced with a runnable probe first, and in the second case
@@ -702,7 +772,7 @@ all public — plus the in-repo modules and `CWebP`.
 .build/release/TriCap --render-ui-snapshots ./build/ui-snapshots
 ```
 
-Fifteen PNGs in `build/ui-snapshots/`, all inspected individually:
+Nineteen PNGs in `build/ui-snapshots/`, all inspected individually:
 
 | File | Shows |
 |---|---|
@@ -720,6 +790,10 @@ Fifteen PNGs in `build/ui-snapshots/`, all inspected individually:
 | `12-recording-countdown.png` | Countdown, now drawn by `RecordingHUD.populateCountdown` itself: `3`, "Recording starts…", "Esc to cancel" — and Escape now genuinely works from other apps |
 | `13-export-toast-warning.png` | **Round 4.** The same toast carrying a wrapping warning, proving the panel grows instead of clipping |
 | `15-hud-placement-near-fullscreen.png` | **Round 7, new.** A 94%-tall selection drawn 1:1 against its display: red strips are outside the visible frame (menu bar and Dock), blue is the selection, and the real HUD sits where `HUDPlacement` put it (`strategy: insideTop`) — clear of both strips. The case that used to land 119 pt off the top |
+| `16-banner-over-window-highlight.png` | **Round 8, new.** A full-screen window highlight — the `.copy` fill that used to erase the banner. The banner is intact on top |
+| `17-banner-over-selection.png` | **Round 8, new.** A recording-mode selection dragged through the banner: the punch-out and red border are visible *behind* the intact banner |
+| `18-mosaic-before-after.png` | **Round 8, new.** Original vs pixelated on report-shaped content (dark rows on a light page, bright band at the mirrored position). The blocks derive from the dark rows — not white, not orange |
+| `19-settings-login-approval.png` | **Round 8, new.** The login toggle in `requiresApproval`: on, orange explanation, "Open Login Items Settings…" entry point |
 | `14-selection-window-highlight.png` | **Round 5, new.** The pre-drag state: a window under the pointer outlined and tinted, with a `1120 × 640 px · click to capture` badge — the real `SelectionOverlayView.drawWindowHighlight` |
 
 **These are offscreen renders of the real view hierarchies** (`NSHostingView` / `SelectionOverlayView`

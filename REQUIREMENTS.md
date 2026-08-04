@@ -170,6 +170,52 @@ computed by [IncrementalTimeline](Sources/TriCapKit/IncrementalTimeline.swift), 
 `ClipTiming` also runs — pinned by *Live and batch timelines agree* (3), because a one-millisecond
 divergence would make the pre-encoded file silently wrong for the timeline it claims.
 
+## Round 8 — banner layering, system mosaic, login item, release boundary
+
+### A. The mode banner is always on top (P0)
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| A1 | Verify the actual cause before changing anything | Read of `draw(_:)`: banner drawn first, then selection punch (`.copy`+clear) and highlight (`.copy`+12% black) replace its pixels. Not a window-level problem | failing tests measured the exact erase values (alpha 0.0 / 0.121) |
+| A2 | Fix by draw order inside the same overlay, no extra window | mask → highlight/selection + readouts → banner **last** ([SelectionOverlayView.swift](Sources/SelectionUI/SelectionOverlayView.swift)) | *Selection mode banner stays on top* (10; 7 fail on the old order) |
+| A3 | Banner never erased, never in the capture | overlay windows are `sharingType=.none`, dismissed before capture, and the SCK filter excludes TriCap | code paths re-verified this round |
+| A4 | Regressions + real-view snapshots for every overlap | highlight through banner, selection through banner, full-screen, top edge, Retina 2×, recording mode, punch/lift still work | tests + snapshots 16, 17 |
+
+### B. System mosaic (P0)
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| B1 | Reproduce before asserting a root cause | [mosaic-mirror-probe.swift](scripts/diagnostics/mosaic-mirror-probe.swift): red top band pixelated → came back blue. The crop was double-flipped, sampling the mirrored band — white blocks on light pages | probe output recorded in the commit |
+| B2 | Replace with `CIPixellate`; no hand-written averaging/scaling, no custom shaders | [AnnotationRenderer.swift](Sources/AnnotationCore/AnnotationRenderer.swift) `drawMosaic` | *Mosaic* (13; 3 fail on the old code) |
+| B3 | Zero third-party deps; MetalPetal only with benchmark evidence | Core Image measured **3.2 ms/frame** on a real 800×600 capture (selftest prints it) — no case for a dependency; GPUImage3 not adopted | selftest diagnostic |
+| B4 | Shared `CIContext`, thread safety, colour space, alpha | one static sRGB `CIContext` (`cacheIntermediates` off); filters per call; opaque output | concurrency test (6 parallel renders byte-equal), P3 and transparent-input tests |
+| B5 | Canvas-anchored grid, no drift | `filter.center` = canvas top-left; probe established pixellate samples block centres tiled from `center` | grid test (130 mismatches on old code) |
+| B6 | `mosaicBlockSize` semantics kept, copy fixed | block edge in pixels (now exact); tooltip says "pixelate", not "blur"; no data migration | tests + copy diff |
+| B7 | Layer order: covers earlier, later stays visible; outside untouched; no white blocks/holes | full-canvas snapshot sampled, band cut in CGImage row space (a CI-side band crop returns wrong pixels when a block's sample point falls outside it — probed) | ordering, outside-untouched, edge-clip, alpha tests; reworked legacy AnnotationTests case pins the crop hazard |
+| B8 | One render path for preview and every export format | unchanged: everything goes through `AnnotationRenderer.render` | determinism test (two calls byte-equal) |
+| B9 | Document the security boundary | ARCHITECTURE.md: pixelation is visual obscuration, not redaction; use a filled rectangle for secrets. No new tool this round | doc |
+
+### C. Launch at login
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| C1 | `SMAppService.mainApp` only; macOS 14+; no LaunchAgent/helper/private API | [LoginItemController.swift](Sources/TriCapApp/LoginItemController.swift) | code audit |
+| C2 | Off by default; system status the only truth, no parallel Bool | no `AppSettings` field; status re-read on pane appearance and after every action | *Login item status mapping* / *toggle decisions* (8) |
+| C3 | Settings toggle + a11y copy; all four statuses handled inline; approval opens Login Items | Startup section in [SettingsView.swift](Sources/TriCapApp/SettingsView.swift); `LoginItemPresentation` in [LoginItem.swift](Sources/TriCapKit/LoginItem.swift) | tests + snapshots 01, 19 |
+| C4 | Idempotent register/unregister; errors never dressed as success | `LoginItemAction.action(forDesired:current:)`; controller re-reads status after every action, shows thrown errors inline | tests |
+| C5 | No real logout/login performed | — | listed as unverified in REVIEW_HANDOFF §4.11 and release/RELEASE_PLAN.md |
+
+### D. Install & release boundary
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| D1 | Version-controlled release plan | [release/RELEASE_PLAN.md](release/RELEASE_PLAN.md) | — |
+| D2 | Never claim the current bundle is distributable | plan states arm64 + ad-hoc, release **BLOCKED** | — |
+| D3 | Reproducible DMG packaging, fail-closed, no credentials | [package-release.sh](scripts/package-release.sh): Developer ID + Hardened Runtime + timestamp + notarytool + staple when present; `--local-test` otherwise; outputs to gitignored `build/dist` | both gates and the local-test DMG exercised on this machine |
+| D4 | Release template with honest sections | [release/RELEASE_TEMPLATE.md](release/RELEASE_TEMPLATE.md): Minimum requirement ≠ Verified environments; Not yet verified; Known limitations | — |
+| D5 | Release stays BLOCKED without Developer ID + accepted notarization | plan §blockers; no tag/upload; no Gatekeeper workaround anywhere | `security find-identity`: 0 identities |
+| D6 | Apple Silicon only until Universal 2 is real | plan + template say arm64-only | — |
+
 ## Deliverables
 
 | Deliverable | Location |

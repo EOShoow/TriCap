@@ -71,10 +71,13 @@ public final class LivePreEncoder: @unchecked Sendable {
     /// recording's own frame ceiling (30 fps × 30 s max), so no cap is needed.
     private var encodeDurationsMs: [Double] = []
     /// The shared timeline rule, so the timestamps here are exactly the ones `ClipTiming` will
-    /// compute for the same frames at export time.
-    private var timeline = IncrementalTimeline()
+    /// compute for the same frames at export time — including grid smoothing, which both sides
+    /// derive from the same nominal interval.
+    private let nominalFrameInterval: TimeInterval
+    private var timeline: IncrementalTimeline
 
-    /// - Parameter frameRate: only used to size the default backlog; the encoder does not care.
+    /// - Parameter frameRate: sizes the default backlog and anchors the smoothing grid — it must
+    ///   be the recording's real frame rate, or the live timeline diverges from the export one.
     public init(
         canvasSize: CGSize,
         options: AnimatedWebPOptions,
@@ -85,6 +88,8 @@ public final class LivePreEncoder: @unchecked Sendable {
         self.canvasSize = canvasSize
         self.options = options
         self.strategy = strategy
+        self.nominalFrameInterval = 1.0 / Double(max(1, frameRate))
+        self.timeline = IncrementalTimeline(nominalFrameInterval: 1.0 / Double(max(1, frameRate)))
         self.maxBacklog = maxBacklog ?? max(8, min(Self.defaultMaxBacklog, frameRate * 5))
         self.queue = DispatchQueue(
             label: "app.tricap.pre-encode",
@@ -292,7 +297,7 @@ public final class LivePreEncoder: @unchecked Sendable {
         if abandonment == nil { abandonment = .cancelled }
         let session = self.session
         self.session = nil
-        timeline = IncrementalTimeline()
+        timeline = IncrementalTimeline(nominalFrameInterval: nominalFrameInterval)
         lock.unlock()
 
         queue.async { session?.release() }

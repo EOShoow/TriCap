@@ -73,7 +73,9 @@ struct IncrementalTimelineTests {
         // for the timeline it claims — so the two must come from one rule.
         let frames = captureTimestamps.map { RecordedFrame(pngData: Data([0]), timestamp: $0) }
         let batch = ClipTiming.timeline(for: frames, nominalFrameInterval: 1.0 / 12.0)
-        let live = IncrementalTimeline.timestamps(forCaptureTimestamps: captureTimestamps)
+        let live = IncrementalTimeline.timestamps(
+            forCaptureTimestamps: captureTimestamps, nominalFrameInterval: 1.0 / 12.0
+        )
         #expect(batch?.timestampsMs == live)
     }
 
@@ -346,7 +348,11 @@ struct LivePreEncoderTests {
         #expect(artifact.frameCount == 8)
         #expect(artifact.canvasSize == canvas)
         #expect(artifact.endTimestampMs == 800)
-        #expect(artifact.timestampsMs == (0..<8).map { $0 * 100 })
+        // 100 ms spacing fed to a 12 fps encoder is off-grid jitter; what matters is that the
+        // artifact carries exactly the timestamps the export path will compute for these frames.
+        let frames = (0..<8).map { RecordedFrame(pngData: Data([0]), timestamp: Double($0) * 0.1) }
+        let expected = ClipTiming.timeline(for: frames, nominalFrameInterval: 1.0 / 12.0)
+        #expect(artifact.timestampsMs == expected?.timestampsMs)
         #expect(!artifact.data.isEmpty)
 
         let info = try WebPCodec.inspectAnimation(data: artifact.data)

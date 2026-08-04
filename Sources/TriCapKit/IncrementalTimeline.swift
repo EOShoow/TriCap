@@ -7,10 +7,29 @@ import Foundation
 /// path and the export path disagree about a single millisecond, the pre-encoded file is silently
 /// wrong. So the rule lives here once, and both paths run it.
 ///
-/// The rule: the first frame is 0, and every later frame is its real offset from the first, forced
-/// to be at least `minimumStepMs` past its predecessor. ScreenCaptureKit hands out true
-/// presentation times, so two frames can share a millisecond after a fast redraw and be far apart
-/// after a stall; the encoder rejects a non-increasing timestamp outright.
+/// # The base rule
+///
+/// The first frame is 0, and every later frame is its real offset from the first, forced to be at
+/// least `minimumStepMs` past its predecessor. ScreenCaptureKit hands out true presentation
+/// times, so two frames can share a millisecond after a fast redraw and be far apart after a
+/// stall; the encoder rejects a non-increasing timestamp outright.
+///
+/// # Grid smoothing (when a nominal frame interval is provided)
+///
+/// A real 12 fps recording measured frame gaps wobbling between 66 and 100 ms — ScreenCaptureKit
+/// delivers when content changes, not on a metronome — and that wobble plays back as judder on
+/// top of the low frame rate. With `nominalFrameInterval` set, timestamps snap to the **absolute
+/// grid** at multiples of the interval, but only when the deviation is small:
+///
+/// - snap only within 25% of the interval — a bigger deviation is information, not noise;
+/// - **causal**: each frame is decided as it arrives, from already-arrived frames only, because
+///   the live pre-encoder writes the value into the WebP immediately and nothing can be rewritten;
+/// - a real hold — a gap of at least twice the interval, like the seconds a static screen sits
+///   unchanged — is never snapped, so it can never be shortened;
+/// - strict monotonicity and the minimum step always win over the grid (two frames pulled to the
+///   same tick resolve to `previous + minimumStepMs`).
+///
+/// Without a nominal interval the behaviour is bit-identical to the original rule.
 ///
 /// Only per-frame timestamps are derivable live. The clip's *end* timestamp depends on the
 /// measured wall-clock duration, which is not known until recording stops — see
@@ -21,13 +40,33 @@ public struct IncrementalTimeline: Sendable {
     /// duration every mainstream renderer honours without clamping.
     public static let defaultMinimumStepMs = 10
 
+    /// Snap window, as a fraction of the nominal interval.
+    public static let snapToleranceFraction = 0.25
+
+    /// A gap at least this many nominal intervals long is a hold, and holds are untouchable.
+    public static let holdThresholdIntervals = 2.0
+
     public private(set) var timestampsMs: [Int] = []
 
     private let minimumStepMs: Int
+    /// Nominal frame interval in (fractional) milliseconds, or `nil` for the un-smoothed rule.
+    private let gridMs: Double?
+    private let toleranceMs: Double
     private var base: TimeInterval?
 
-    public init(minimumStepMs: Int = IncrementalTimeline.defaultMinimumStepMs) {
+    public init(
+        minimumStepMs: Int = IncrementalTimeline.defaultMinimumStepMs,
+        nominalFrameInterval: TimeInterval? = nil
+    ) {
         self.minimumStepMs = max(1, minimumStepMs)
+        if let nominalFrameInterval, nominalFrameInterval > 0 {
+            let grid = nominalFrameInterval * 1000.0
+            self.gridMs = grid
+            self.toleranceMs = grid * Self.snapToleranceFraction
+        } else {
+            self.gridMs = nil
+            self.toleranceMs = 0
+        }
     }
 
     public var count: Int { timestampsMs.count }
@@ -41,8 +80,28 @@ public struct IncrementalTimeline: Sendable {
             timestampsMs.append(0)
             return 0
         }
-        let raw = Int(((captureTimestamp - base) * 1000.0).rounded())
-        let value = timestampsMs.last.map { max(raw, $0 + minimumStepMs) } ?? 0
+        let rawMs = (captureTimestamp - base) * 1000.0
+        let raw = Int(rawMs.rounded())
+        // Non-first frame, so the array is never empty here.
+        let previous = timestampsMs.last ?? 0
+
+        var value = raw
+        if let gridMs {
+            // The gap is measured against the previous *emitted* value. That is the causal choice
+            // — it is the number already written into the file — and it is conservative: a
+            // previous frame snapped downward can only make a gap look longer, i.e. more likely
+            // to be treated as a hold and left alone.
+            let gapMs = rawMs - Double(previous)
+            let isHold = gapMs >= Self.holdThresholdIntervals * gridMs
+            if !isHold {
+                let tickMs = (rawMs / gridMs).rounded() * gridMs
+                if abs(rawMs - tickMs) <= toleranceMs {
+                    value = Int(tickMs.rounded())
+                }
+            }
+        }
+
+        value = max(value, previous + minimumStepMs)
         timestampsMs.append(value)
         return value
     }
@@ -51,9 +110,12 @@ public struct IncrementalTimeline: Sendable {
     /// paths cannot drift apart.
     public static func timestamps(
         forCaptureTimestamps captureTimestamps: [TimeInterval],
-        minimumStepMs: Int = IncrementalTimeline.defaultMinimumStepMs
+        minimumStepMs: Int = IncrementalTimeline.defaultMinimumStepMs,
+        nominalFrameInterval: TimeInterval? = nil
     ) -> [Int] {
-        var timeline = IncrementalTimeline(minimumStepMs: minimumStepMs)
+        var timeline = IncrementalTimeline(
+            minimumStepMs: minimumStepMs, nominalFrameInterval: nominalFrameInterval
+        )
         for timestamp in captureTimestamps { timeline.append(captureTimestamp: timestamp) }
         return timeline.timestampsMs
     }

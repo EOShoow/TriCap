@@ -129,9 +129,12 @@ public enum ClipTiming {
         let minStep = max(1, minimumFrameDurationMs)
 
         // Shared with the live pre-encoder, which has to produce identical timestamps while the
-        // recording is still running — see `IncrementalTimeline`.
+        // recording is still running — see `IncrementalTimeline`. The nominal interval switches
+        // on grid smoothing in both places at once; they can never disagree.
         let timestamps = IncrementalTimeline.timestamps(
-            forCaptureTimestamps: frames.map(\.timestamp), minimumStepMs: minStep
+            forCaptureTimestamps: frames.map(\.timestamp),
+            minimumStepMs: minStep,
+            nominalFrameInterval: nominalFrameInterval
         )
 
         let lastTimestamp = timestamps[timestamps.count - 1]

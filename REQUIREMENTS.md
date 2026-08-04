@@ -250,6 +250,15 @@ divergence would make the pre-encoded file silently wrong for the timeline it cl
 Independent review correction: the preset ladder is monotonic again (12, 12, 15, 20). The frame-
 rate monotonicity invariant was restored, and the 20 fps Balanced copy was removed.
 
+## Round 10 — hot key opens in the remembered mode
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| R1 | The capture hot key need not always mean "screenshot": remember the last used mode (user chose this over a second hot key for its smaller surface) | [HotKeyLaunchMode.swift](Sources/TriCapKit/HotKeyLaunchMode.swift): three explicit choices — always screenshot / always recording / **remember last (default)**; pure `effectiveIntent(lastUsed:)` decision | *Hot key launch mode* (7) |
+| R2 | Only a **completed** selection updates the memory; cancelling says nothing | persisted at the `selected` outcome in `AppDelegate.beginCapture`; `.cancelled` leaves it untouched | code path + test of stored-history round-trip |
+| R3 | Upgrades behave identically on first use | old blobs decode to `rememberLast` + `.still`, so the first press is a screenshot exactly as before; unknown future raw values degrade without losing the blob | legacy/unknown/round-trip decode tests |
+| R4 | The mode is always visible and reversible | unchanged: the picker banner names the mode, `R`/`S` switch instantly; every settings summary names the switch keys | copy test + snapshot 01 |
+
 ## Deliverables
 
 | Deliverable | Location |

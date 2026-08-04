@@ -61,11 +61,20 @@ struct SettingsView: View {
                 if let hotKeyError {
                     Text(hotKeyError).font(.caption).foregroundStyle(.red)
                 }
-                Text("Opens the region picker. **Click a window** to capture it, or drag out any area — hold **⌥** while dragging to ignore edge snapping. **R** switches to recording, **S** back to a screenshot, **Esc** cancels.")
+                Picker("Shortcut opens", selection: $store.settings.hotKeyLaunchMode) {
+                    ForEach(HotKeyLaunchMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                Text(store.settings.hotKeyLaunchMode.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("In the picker: **click a window** to capture it, or drag out any area — hold **⌥** while dragging to ignore edge snapping. **R** switches to recording, **S** back to a screenshot, **Esc** cancels.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Screenshot shortcut")
+                Text("Capture shortcut")
             }
 
             Section {

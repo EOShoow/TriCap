@@ -33,6 +33,28 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.0000000000 Round 10 — the hot key remembers the last capture mode
+
+User decision: rather than a second global hot key, ⌥⇧5 now opens in the mode of the **last
+completed** selection (option B — chosen for the smaller surface: no new Carbon slot, no new
+conflict path, no new settings recorder). Implemented as an explicit three-way setting —
+always screenshot / always recording / remember last — with *remember last* the default.
+
+- The decision is a pure `TriCapKit` function; fixed modes provably ignore history.
+- Memory updates only on a `selected` outcome (menu entries included, since every entry point
+  funnels through the same selector); a cancelled picker changes nothing.
+- Migration: old blobs land on `rememberLast` + `.still`, so the first post-upgrade press is a
+  screenshot exactly as before; unknown future raw values degrade to defaults without discarding
+  the blob. 7 new tests; 480 total green.
+- Settings: the "Screenshot shortcut" section is now "Capture shortcut" with the picker and
+  per-mode copy that always names the `R`/`S` escape hatch (snapshot 01 regenerated and reviewed;
+  the General form now scrolls slightly on short displays — the interactive rows stay on top).
+
+**Unverified**: a real ⌥⇧5 press cycling still→recording→restart→recording cannot be automated
+(Carbon hot keys cannot be synthesised without extra permissions). The decision function,
+persistence and decode paths are fully tested; the two lines wiring them into the hot-key
+callback and the outcome switch are code-reviewed only.
+
 ## 0.000000000 Round 9a — Codex direct repair: truthful capture load, settings and holds
 
 Independent acceptance invalidated the Round-9 preset promotion and produced three source-level

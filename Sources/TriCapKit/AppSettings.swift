@@ -78,6 +78,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var pinHotKey: HotKeyCombo
     /// What happens after a still capture succeeds.
     public var stillCaptureAction: StillCaptureAction
+    /// What the capture hot key opens: a fixed mode, or whatever completed last.
+    public var hotKeyLaunchMode: HotKeyLaunchMode
+    /// The mode of the last *completed* selection. Only consulted by ``HotKeyLaunchMode/rememberLast``;
+    /// a cancelled picker never updates it.
+    public var lastCaptureIntent: CaptureIntent
     /// Directory files are written to.
     public var saveDirectoryPath: String
     /// Optional Markdown/Obsidian vault root. When the output lands inside it, TriCap
@@ -116,6 +121,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hotKey: HotKeyCombo = .default,
         pinHotKey: HotKeyCombo = .defaultPin,
         stillCaptureAction: StillCaptureAction = .copyToClipboard,
+        hotKeyLaunchMode: HotKeyLaunchMode = .rememberLast,
+        lastCaptureIntent: CaptureIntent = .still,
         saveDirectoryPath: String = AppSettings.defaultSaveDirectory.path,
         markdownVaultRootPath: String? = nil,
         markdownLinkStyle: MarkdownLinkStyle = .markdown,
@@ -138,6 +145,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.hotKey = hotKey
         self.pinHotKey = pinHotKey
         self.stillCaptureAction = stillCaptureAction
+        self.hotKeyLaunchMode = hotKeyLaunchMode
+        self.lastCaptureIntent = lastCaptureIntent
         self.saveDirectoryPath = saveDirectoryPath
         self.markdownVaultRootPath = markdownVaultRootPath
         self.markdownLinkStyle = markdownLinkStyle
@@ -253,6 +262,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         pinHotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .pinHotKey) ?? fallback.pinHotKey
         stillCaptureAction = c.decodeTolerantly(StillCaptureAction.self, forKey: .stillCaptureAction)
             ?? fallback.stillCaptureAction
+        hotKeyLaunchMode = c.decodeTolerantly(HotKeyLaunchMode.self, forKey: .hotKeyLaunchMode)
+            ?? fallback.hotKeyLaunchMode
+        lastCaptureIntent = c.decodeTolerantly(CaptureIntent.self, forKey: .lastCaptureIntent)
+            ?? fallback.lastCaptureIntent
         saveDirectoryPath = try c.decodeIfPresent(String.self, forKey: .saveDirectoryPath) ?? fallback.saveDirectoryPath
         markdownVaultRootPath = try c.decodeIfPresent(String.self, forKey: .markdownVaultRootPath)
         markdownLinkStyle = c.decodeTolerantly(MarkdownLinkStyle.self, forKey: .markdownLinkStyle) ?? fallback.markdownLinkStyle

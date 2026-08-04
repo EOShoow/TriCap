@@ -283,7 +283,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let desired = store.settings.hotKey
         let outcome = HotKeyRegistrationPolicy.apply(desired: desired, previous: previous) { combo in
             GlobalHotKeyMonitor.shared.register(combo, in: .primaryCapture) { [weak self] in
-                Task { @MainActor in self?.beginCapture(mode: .still) }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.beginCapture(mode: self.hotKeyLaunchCaptureMode())
+                }
             }
         }
 
@@ -426,6 +429,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// has been fully torn down. `recordClip` therefore awaits `RecordingSession.run()` rather
     /// than returning as soon as the HUD is on screen — which is what previously let a second
     /// trigger overwrite the live recorder, HUD, stop target and cancel key.
+    /// The mode the hot key opens with — a fixed choice, or the last completed one.
+    private func hotKeyLaunchCaptureMode() -> RegionSelector.CaptureMode {
+        let intent = store.settings.hotKeyLaunchMode.effectiveIntent(
+            lastUsed: store.settings.lastCaptureIntent
+        )
+        return intent == .recording ? .recording : .still
+    }
+
+    /// Remember what actually completed. Cancellations deliberately do not count: an aborted
+    /// picker says nothing about what the user wants next time.
+    private func rememberCompletedCaptureIntent(_ mode: RegionSelector.CaptureMode) {
+        let intent: CaptureIntent = mode == .recording ? .recording : .still
+        guard store.settings.lastCaptureIntent != intent else { return }
+        store.settings.lastCaptureIntent = intent
+    }
+
     private func beginCapture(mode: RegionSelector.CaptureMode, forceEditor: Bool = false) {
         guard gate.tryBegin() else { return }
         toast.dismiss()
@@ -454,9 +473,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             case .cancelled:
                 TriCapLog.app.info("capture cancelled at selection")
             case .selected(let region, .still):
+                rememberCompletedCaptureIntent(.still)
                 gate.transition(to: .capturingStill)
                 await captureStill(region: region, forceEditor: forceEditor)
             case .selected(let region, .recording):
+                rememberCompletedCaptureIntent(.recording)
                 await recordClip(region: region)
             }
         }

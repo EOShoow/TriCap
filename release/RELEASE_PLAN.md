@@ -55,17 +55,21 @@ macOS 26.5.2 (build 25F84), Apple Silicon arm64, Swift 6.3.3, two displays
   machine-parsed), the staple validates and `spctl` passes on the mounted app — until then the
   artefact lives under a temporary name in a per-run temp directory, and the final name is
   claimed with a **hard link whose EEXIST is kernel-atomic** (no check-then-move window).
-  Ten scenarios, three consecutive full runs, all green: notary *rejected* / *command failure* /
+  Ten scenarios, five consecutive full runs, all green (**73 checks per run, 365/365 total**):
+  every injected failure must match its own gate-specific error, so an earlier preflight failure
+  cannot masquerade as coverage; scenarios are notary *rejected* / *command failure* /
   *unparsable output*, *staple failure*, *spctl rejection*, *SIGTERM mid-upload*,
   *target already exists*, **all-success stubs** (the test-mode hard barrier: even fully faked
   verdicts can only mint `…-TEST-PROBE.dmg`, never the official name, never the release banner),
   a **two-run race** for one target (exactly one winner in either ordering; the loser exits
   non-zero; the winner's inode and hash never change), and the real `--local-test` build.
-  The probe has now caught three real defects across its life: a trap that reported exit 0
-  after SIGTERM; a mount-table check that never matched because /sbin/mount prints
-  /private/var/… where $TMPDIR says /var/…; and a `detach`/`rm` race with macOS's asynchronous
-  unmount that could strand an undeletable mountpoint — all fixed, with detaches now polling
-  the mount table by physical path until the volume is truly gone.
+  The probe has now caught five real release-path defects across its life: a trap that reported
+  exit 0 after SIGTERM; a mount-table check that never matched because /sbin/mount prints
+  /private/var/… where $TMPDIR says /var/…; a `detach`/`rm` race with macOS's asynchronous
+  unmount; a `security | grep -q` + `pipefail` SIGPIPE race that randomly rejected a valid
+  identity; and parent-only TERM being deferred behind a live notary child. All are fixed:
+  detaches poll the physical mount path, identity output is fully captured before matching, and
+  notarization is a tracked child that the signal handler terminates and reaps before cleanup.
 
 ## Not yet verified
 

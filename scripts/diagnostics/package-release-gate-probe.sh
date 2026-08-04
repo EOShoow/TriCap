@@ -63,7 +63,15 @@ cleanup() {
   rm -rf "$WORK" 2>/dev/null || { sleep 1; rm -rf "$WORK" 2>/dev/null; }
   set -e
 }
-trap cleanup EXIT INT TERM
+on_probe_signal() {
+  local signal_number="$1"
+  trap - EXIT INT TERM
+  cleanup
+  exit $((128 + signal_number))
+}
+trap cleanup EXIT
+trap 'on_probe_signal 2' INT
+trap 'on_probe_signal 15' TERM
 
 check() { # check <label> <condition-result: 0 pass>
   if [[ "$2" == "0" ]]; then
@@ -99,10 +107,14 @@ no_mount_residue() { # 0 when nothing from this probe's workspace is mounted or 
 # ---------------------------------------------------------------- stub tools
 FAKE_IDENTITY="Developer ID Application: Probe Fixture (XXXXXXXXXX)"
 
-cat > "$STUBS/security" <<EOF
+cat > "$STUBS/security" <<'EOF'
 #!/bin/bash
-echo '  1) 0000000000000000000000000000000000000000 "$FAKE_IDENTITY"'
+echo '  1) 0000000000000000000000000000000000000000 "Developer ID Application: Probe Fixture (XXXXXXXXXX)"'
 echo '     1 valid identities found'
+# Keep writing well beyond a pipe buffer. The production script must consume the complete
+# command output before matching it; an old `security | grep -q` implementation intermittently
+# killed this producer with SIGPIPE under pipefail and misreported the valid identity as absent.
+for i in {1..4096}; do echo '     additional non-matching identity diagnostic'; done
 EOF
 cat > "$STUBS/codesign" <<'EOF'
 #!/bin/bash
@@ -136,7 +148,11 @@ exit 0
 EOF
 cat > "$STUBS/notary-hang" <<'EOF'
 #!/bin/bash
-sleep 300
+# Replace the stub shell rather than spawning a grandchild, so the package script's tracked child
+# PID is the actual long-running process that must be terminated and reaped on SIGTERM.
+: "${TRICAP_PROBE_NOTARY_STARTED:?missing probe start marker path}"
+: > "$TRICAP_PROBE_NOTARY_STARTED"
+exec sleep 300
 EOF
 cat > "$STUBS/stapler-fail" <<'EOF'
 #!/bin/bash
@@ -169,6 +185,7 @@ packaged_env() { # packaged_env <notary-stub> <stapler-stub> <spctl-path>
     "TRICAP_SECURITY=$STUBS/security" \
     "TRICAP_CODESIGN=$STUBS/codesign" \
     "TRICAP_NOTARYTOOL=$STUBS/$1" \
+    "TRICAP_PROBE_NOTARY_STARTED=$WORK/notary-started" \
     "TRICAP_STAPLER=$STUBS/$2" \
     "TRICAP_SPCTL=$3"
 }
@@ -188,9 +205,14 @@ run_packaged_bg() { # same, but $! is the SCRIPT's pid — `exec` sheds the wrap
   ( exec env "${envs[@]}" ./scripts/package-release.sh > "$log" 2>&1 ) &
 }
 
-assert_failure_scenario() { # <label> <exit-code>
-  local label="$1" exit_code="$2"
+assert_failure_scenario() { # <label> <exit-code> <logfile> <expected-gate-message>
+  local label="$1" exit_code="$2" log="$3" expected="$4"
   check "$label: exits non-zero (got $exit_code)" "$([[ $exit_code -ne 0 ]]; echo $?)"
+  # A non-zero exit alone is not coverage: an identity or build failure before the requested
+  # gate would otherwise make every injected scenario look green. Require the gate-specific
+  # failure text emitted only after that stage was actually reached.
+  check "$label: reached its intended gate ('$expected')" \
+        "$(grep -Fq "$expected" "$log"; echo $?)"
   check "$label: no official TriCap-$VERSION.dmg in isolated dist" "$([[ ! -e "$OFFICIAL" ]]; echo $?)"
   check "$label: no TEST-PROBE artefact either" "$([[ ! -e "$TEST_PROBE_DMG" ]]; echo $?)"
   check "$label: no temp residue in isolated dist" \
@@ -200,38 +222,44 @@ assert_failure_scenario() { # <label> <exit-code>
         "$([[ "$(shasum -a 256 "$HISTORICAL" | cut -d' ' -f1)" == "$HISTORICAL_SUM" ]]; echo $?)"
 }
 
-scenario_fail() { # <label> <notary> <stapler> <spctl-path>
-  echo "== scenario: $1"
+scenario_fail() { # <label> <notary> <stapler> <spctl-path> <expected-gate-message>
+  local label="$1" log="$WORK/out-$1.log"
+  echo "== scenario: $label"
   set +e
-  run_packaged "$2" "$3" "$4" "$WORK/out-$1.log"
+  run_packaged "$2" "$3" "$4" "$log"
   local code=$?
   set -e
-  assert_failure_scenario "$1" "$code"
+  assert_failure_scenario "$label" "$code" "$log" "$5"
 }
 
 # 1–5: injected verdict failures
-scenario_fail "notary-rejected"   "notary-invalid"  "stapler-ok"   "/usr/sbin/spctl"
-scenario_fail "notary-crash"      "notary-crash"    "stapler-ok"   "/usr/sbin/spctl"
-scenario_fail "notary-unparsable" "notary-garbage"  "stapler-ok"   "/usr/sbin/spctl"
-scenario_fail "staple-fail"       "notary-accepted" "stapler-fail" "/usr/sbin/spctl"
-scenario_fail "spctl-reject"      "notary-accepted" "stapler-ok"   "$STUBS/spctl-reject"
+scenario_fail "notary-rejected"   "notary-invalid"  "stapler-ok"   "/usr/sbin/spctl"      "notarization status is 'Invalid'"
+scenario_fail "notary-crash"      "notary-crash"    "stapler-ok"   "/usr/sbin/spctl"      "notarytool submit failed"
+scenario_fail "notary-unparsable" "notary-garbage"  "stapler-ok"   "/usr/sbin/spctl"      "notarization status is '<unparsable>'"
+scenario_fail "staple-fail"       "notary-accepted" "stapler-fail" "/usr/sbin/spctl"      "stapler staple failed"
+scenario_fail "spctl-reject"      "notary-accepted" "stapler-ok"   "$STUBS/spctl-reject" "spctl rejected the app"
 
 # 6: SIGTERM mid-"upload" — the trap must clean up and exit 128+15
 echo "== scenario: interrupted"
+rm -f "$WORK/notary-started"
 set +e
 run_packaged_bg "notary-hang" "stapler-ok" "/usr/sbin/spctl" "$WORK/out-interrupted.log"
 PKG_PID=$!
+reached_upload=0
 for _ in $(seq 1 240); do
-  compgen -G "$ISO_DIST/.pkg-tmp-*" > /dev/null && break
+  if [[ -e "$WORK/notary-started" ]]; then
+    reached_upload=1
+    break
+  fi
   sleep 0.5
 done
-check "interrupted: temp workspace observed while running" \
-      "$(compgen -G "$ISO_DIST/.pkg-tmp-*" > /dev/null; echo $?)"
+check "interrupted: notary child confirmed running before SIGTERM" \
+      "$([[ $reached_upload -eq 1 ]]; echo $?)"
 kill -TERM "$PKG_PID" 2>/dev/null || true
 wait "$PKG_PID"; interrupted_code=$?
 set -e
 sleep 1
-assert_failure_scenario "interrupted" "$interrupted_code"
+assert_failure_scenario "interrupted" "$interrupted_code" "$WORK/out-interrupted.log" "notarytool submit"
 
 # 7: official target already exists (in the ISOLATED dist) → refuse before building
 echo "== scenario: target-exists"

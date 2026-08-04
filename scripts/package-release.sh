@@ -102,6 +102,36 @@ fail() { echo "!! $1" >&2; exit 1; }
 # about the rest of build/dist.
 TMP_ROOT=""
 MOUNTPOINT=""
+ACTIVE_CHILD_PID=""
+
+# A TERM sent only to this script (as CI timeout supervisors commonly do) does not automatically
+# reach a foreground child. Bash also defers a trap while a foreground external command is still
+# running. Long-running notarization therefore runs as a tracked background child while this
+# shell waits with the `wait` builtin; a trapped signal can then terminate and reap it promptly.
+terminate_active_child() {
+  local pid="$ACTIVE_CHILD_PID" i
+  [[ -n "$pid" ]] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  ACTIVE_CHILD_PID=""
+}
+
+run_interruptible_to_file() { # <stdout-file> <command> [args...]
+  local output="$1" child_code=0
+  shift
+  "$@" > "$output" &
+  ACTIVE_CHILD_PID=$!
+  wait "$ACTIVE_CHILD_PID" || child_code=$?
+  ACTIVE_CHILD_PID=""
+  return "$child_code"
+}
 
 # Detach a mountpoint and only return once the kernel agrees it is gone. `hdiutil detach` can
 # report success while the unmount is still completing, and a `rm -rf` racing that window
@@ -144,9 +174,11 @@ on_exit() {
 # status — usually 0 — so a ^C or a CI timeout during the upload looked like SUCCESS to the
 # caller. The gate probe's interruption scenario caught exactly that. Exit 128+signal, always.
 on_signal() {
-  trap - EXIT
+  local signal_number="$1"
+  trap - EXIT INT TERM
+  terminate_active_child
   release_resources
-  exit $((128 + $1))
+  exit $((128 + signal_number))
 }
 trap on_exit EXIT
 trap 'on_signal 2' INT
@@ -167,7 +199,14 @@ if [[ "$MODE" == "release" ]]; then
    Mac App Store and Apple Development identities cannot be notarized for direct distribution." ;;
   esac
 
-  "$SECURITY_BIN" find-identity -v -p codesigning | grep -Fq "$IDENTITY" \
+  # Do not pipe this through `grep -q` while `pipefail` is active. `grep -q` deliberately exits
+  # as soon as it finds a match; if `security` still has output to write it can then receive
+  # SIGPIPE, turning a valid identity into a flaky pipeline failure. Capture the producer's full
+  # result first, preserving its own exit status, and only then inspect the completed text.
+  if ! IDENTITY_LIST="$("$SECURITY_BIN" find-identity -v -p codesigning 2>&1)"; then
+    fail "security find-identity failed while reading the signing identities."
+  fi
+  grep -Fq "$IDENTITY" <<< "$IDENTITY_LIST" \
     || fail "the identity '$IDENTITY' is not present in the keychain (security find-identity)."
 
   [[ -n "$PROFILE" ]] || fail "TRICAP_NOTARY_PROFILE is not set.
@@ -224,8 +263,9 @@ hdiutil create -quiet -volname "TriCap" -srcfolder "$STAGING" -format UDZO -ov "
 if [[ "$MODE" == "release" ]]; then
   echo "==> notarytool submit (waits for the verdict)"
   SUBMIT_JSON="$TMP_ROOT/notary-result.json"
-  "${NOTARY_CMD[@]}" submit "$TMP_DMG" --keychain-profile "$PROFILE" --wait \
-      --output-format json > "$SUBMIT_JSON" \
+  run_interruptible_to_file "$SUBMIT_JSON" \
+      "${NOTARY_CMD[@]}" submit "$TMP_DMG" --keychain-profile "$PROFILE" --wait \
+      --output-format json \
     || fail "notarytool submit failed; nothing was produced. See: xcrun notarytool log"
 
   STATUS="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' \

@@ -33,6 +33,36 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.0000000 Round 8d — Codex direct repair: deterministic identity gate and truthful failure coverage
+
+Baseline `0d9e535`. Independent reruns disproved the prior "three consecutive full runs green"
+claim: the gate probe failed with 4, 3 and 1 checks respectively. The common cause was the
+Developer ID preflight in `scripts/package-release.sh`: under `set -o pipefail`,
+`security find-identity | grep -Fq` let `grep -q` close the pipe after its first match; the
+producer could then receive SIGPIPE, making a valid identity look absent. A deterministic
+stress producer reproduced exit 141 before the fix.
+
+The script now captures the complete `security find-identity` output and its command status
+first, then matches the completed text without a short-circuit pipeline. The probe's security
+fixture deliberately emits 4,096 extra lines, pinning this exact regression. Failure scenarios
+also require their gate-specific error text — `Invalid`, notary command failure, unparsable JSON,
+stapler failure or spctl rejection — so an earlier identity/build failure can no longer masquerade
+as coverage of a later gate.
+
+Strengthening the interruption check to wait until the notary upload really began exposed a
+second issue: TERM sent only to the parent Bash was deferred while its foreground notary child
+continued sleeping. Notarization now runs as a tracked interruptible child; the signal handler
+terminates and reaps it before cleanup. The fixture uses `exec sleep`, so the tracked PID is the
+actual long-running process, and writes a start marker before sleeping; the probe sends TERM only
+after observing that marker. Observed result: child confirmed running, TERM delivered, exit 143,
+no temp, mount, device or official-name residue.
+
+Fresh evidence after these changes: **10 scenarios × 73 checks, five consecutive complete runs
+green (365/365 checks)**; every failure reached its intended gate; the real `build/dist` manifest
+and hashes stayed byte-identical; full 449-test suite and Release bundle audit passed. The real
+Developer ID → Accepted → staple → spctl happy path remains unverified and public release remains
+**BLOCKED**.
+
 ## 0.000000 Round 8c — Codex round 2: probe isolation, test-mode barrier, precise residue checks, atomic claim
 
 All four findings were valid; each is fixed with the failure mode reproduced or exercised.
@@ -74,10 +104,11 @@ deliberately order-independent (either run may win — both orderings were obser
 probe runs): exactly one exit 0, the loser logs the claim refusal, and the winner's file —
 hashed and inode-recorded the moment it first appears — is never replaced.
 
-Probe totals: **10 scenarios, 67 checks, three consecutive full runs green**, no mounts and no
-workspaces left behind, real `build/dist` byte-identical throughout. Still true and restated:
-the Developer ID / real-notarization happy path has never run on any machine; public release
-remains **BLOCKED** (release/RELEASE_PLAN.md).
+Claude reported **10 scenarios, 67 checks, three consecutive full runs green** at this point.
+Independent reruns later found the identity-pipeline flake described in Round 8d; that older
+stability claim is superseded by Round 8d's gate-specific, five-run evidence. The Developer ID /
+real-notarization happy path has never run on any machine; public release remains **BLOCKED**
+(release/RELEASE_PLAN.md).
 
 ## 0.00000 Round 8b — Codex P1: the packaging script could strand an official-looking DMG
 

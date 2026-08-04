@@ -33,6 +33,70 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.00000000 Round 9 — Animated WebP smoothness: observe, smooth, gate
+
+Three commits in phase order (`0cf1e9a` observability, `80a0289` causal smoothing, this one
+evidence-gated presets), per the confirmed brief. The trigger was a real user recording whose
+12 fps timeline wobbled 66–100 ms between frames.
+
+### The gate matrix (real ScreenCaptureKit, full production path, 3 × 15 s per cell)
+
+`--benchmark-recording`, full-region 60 Hz motion driver, `caffeinate`, all 24 recordings with
+**zero dropped frames**. Gates: 0 dropped · 0 abandonment · tail ≤ 2 s · retained ≤ 384 MB ·
+30 fps additionally p95 ≤ 26.7 ms or full-duration zero backlog.
+
+| fps × long edge | p95 encode (worst run) | peak backlog (worst) | abandonments | tail (median) | verdict |
+|---|---|---|---|---|---|
+| 12 × 1440 | 26.8 ms | 1/60 | 0/3 | 0.22 s | **PASS** |
+| 20 × 1440 | 53.6 ms (one transient spike, recovered) | 17/60 | 0/3 | 0.33 s | **PASS** |
+| 24 × 1440 | 38.1 ms | 39/60 | 0/3 | 0.45 s | passes here, **fails the worst-case synthetic bound** (56/60, 4.08 s tail) → stays Custom per the locked plan |
+| 30 × 1440 | 36.8 ms | 60/60 | **1/3** (12.8 s slow-path tail) | 0.71 s | **FAIL** (abandonment + p95 gate) |
+| 12 × 1920 | 51.3 ms | 2/60 | 0/3 | 0.33 s | pass (informational) |
+| 20 × 1920 | 93.0 ms | 60/60 | **1/3** (15.8 s tail) | 0.74 s | **FAIL** — unsupported combination |
+| 24 × 1920 | 89.3 ms | 60/60 | **3/3** | 16.9 s | **FAIL** |
+| 30 × 1920 | 65.1 ms | 60/60 | **3/3** | 21.2 s | **FAIL** (worst-case synthetic retained also 504 MB > 384 MB gate) |
+
+Synthetic worst-case bound (every frame fully different, paced): 12 fps tail 0.75 s · 20 fps
+1.23 s (peak 2/60) · 24 fps 4.08 s (peak 56/60) · 30 fps abandons (tail 23.4 s); at 1920 px even
+20 fps abandons (65 ms/frame). Real screen content lies between the two bounds — worst-case is
+what the gates protect against.
+
+**Outcome, exactly the locked ladder:** smallerFile 10→12 fps, balanced 12→**20 fps**
+(3/3 clean), sharper 1920@15 and highDetail 3840@20 untouched, default stays balanced; 24/30 fps
+and every ≥20 fps @1920 combination remain Custom/unsupported, with the backlog deliberately NOT
+enlarged (it would hide sustained deficit behind memory).
+
+### Migration honesty
+
+Stored settings hold real numbers; labels are derived. Old-Balanced users keep 12 fps **verbatim**
+and relabel to Custom (`oldBalancedValuesRelabelAsCustom` pins it); re-picking Balanced opts into
+20 fps. Fresh installs derive limits from the default preset (`AppSettings` default parameter, so
+"fresh install starts on the preset it claims" is a test again). No value is migrated, Custom is
+never touched, method is never silently adjusted.
+
+### Flagged for Codex review, explicitly
+
+1. **The ladder is now fps-non-monotonic** (12, 20, 15, 20) — a property of the locked safe
+   ladder itself. The old invariant test pinned fps-monotonicity; it was narrowed to the quality
+   axes (still quality, long edge, animation quality — all still monotonic) with the rationale in
+   the test body, and `gatedFrameRates` pins the four shipped numbers instead.
+2. **20 fps @1440 has thinner margin than its medians suggest**: one run showed a transient
+   p95 53.6 ms / backlog 17 spike that recovered without abandonment. Within gates, but the
+   honest reading is "holds with modest headroom", not "holds comfortably".
+3. QoS observation, not acted on: the pre-encode queue (`.utility`) encodes at ~49 ms/frame where
+   a bare thread does 40–41 ms on identical synthetic frames — and, counter-intuitively, ~26 ms
+   on the real path where the whole pipeline shares the machine. Raising QoS would contend with
+   capture; left alone this round.
+
+### Unverified (round 9)
+
+| Item | Why | How to close |
+|---|---|---|
+| **Human playback verdict** | Perceived smoothness is the whole point and cannot be automated. The gates prove delivery/timing health only | User: re-record the original scenario on Balanced (now 20 fps), play in browser + Obsidian, compare against the old 12 fps file; record the verdict. If it fails expectations, the promotion reverts |
+| Smoothing on real content | Grid snapping is proven on measured-jitter fixtures and by live/batch equivalence, not yet by eyeballing a real re-recorded clip | Same re-recording as above; frame durations can be re-inspected with the RIFF parser used in the original diagnosis |
+| Gate matrix entropy coverage | The motion driver is low-entropy (large solid blocks); worst-case comes from synthetic pacing, real mid-entropy content (video playback, scrolling text) was not driven automatically | Optional: record a real video playing in a browser window at 20 fps and confirm no abandonment |
+| Thermal/load sensitivity | The 30@1440 run-2 abandonment shows edge behaviour varies run to run; matrix ran on an otherwise idle machine | Keep 24/30 out of presets until a wider-margin encoder exists |
+
 ## 0.0000000 Round 8d — Codex direct repair: deterministic identity gate and truthful failure coverage
 
 Baseline `0d9e535`. Independent reruns disproved the prior "three consecutive full runs green"

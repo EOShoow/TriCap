@@ -28,7 +28,7 @@ rendered image in `build/ui-snapshots/`; `manual` = needs a human (listed in REV
 | M8 | Arrow, rectangle, text, freehand, mosaic | [AnnotationRenderer.swift](Sources/AnnotationCore/AnnotationRenderer.swift) | tests · snapshot 02 |
 | M9 | Undo / redo | [AnnotationDocument.swift](Sources/AnnotationCore/AnnotationDocument.swift) | tests (14 cases) |
 | M10 | Clip annotations are a fixed overlay on all frames | `ExportService.encodeStreaming` composites the same item list per frame | tests · selftest (per-frame pixel probe) |
-| M11 | Animated WebP defaults: 12 fps, ≤15 s, long edge ≤1440 px, quality 80, infinite loop, no audio | `RecordingLimits()`, `AnimatedWebPOptions()`, `config.capturesAudio = false` | tests · selftest · browser check |
+| M11 | Animated WebP defaults: ≤15 s, long edge ≤1440 px, quality 80, infinite loop, no audio. Default frame rate was 12 fps; raised to **20 fps** in Round 9 behind measured gates (see S9–S13) | `QualityPreset.balanced`, fresh installs derive `RecordingLimits` from the default preset; `config.capturesAudio = false` | tests · selftest · gate matrix |
 | M12 | Configurable save directory and optional vault root | [AppSettings.swift](Sources/TriCapKit/AppSettings.swift), Output tab | snapshot 01 · selftest |
 | M13 | Relative Markdown reference inside the root, file path otherwise | `MarkdownReference.reference` | tests (13 cases) · selftest |
 | M14 | Handle filename conflicts, cancel, encode failure, disk-write failure | `OutputFileWriter` (three atomic claim strategies), `RecordingSession` latched cancel, `TriCapError`, `ExportService` cleanup | tests · selftest |
@@ -215,6 +215,41 @@ divergence would make the pre-encoded file silently wrong for the timeline it cl
 | D4 | Release template with honest sections | [release/RELEASE_TEMPLATE.md](release/RELEASE_TEMPLATE.md): Minimum requirement ≠ Verified environments; Not yet verified; Known limitations | — |
 | D5 | Release stays BLOCKED without Developer ID + accepted notarization | plan §blockers; no tag/upload; no Gatekeeper workaround anywhere | `security find-identity`: 0 identities |
 | D6 | Apple Silicon only until Universal 2 is real | plan + template say arm64-only | — |
+
+## Round 9 — Animated WebP smoothness (three evidence-ordered phases)
+
+### A. Observability first (`0cf1e9a`)
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| S1 | `--benchmark-export` configurable fps/resolution/duration/quality/method | [ExportBenchmark.swift](Sources/TriCapApp/ExportBenchmark.swift); `--no-thorough` for matrix sweeps | run logs in REVIEW_HANDOFF |
+| S2 | p50/p95 encode, peak backlog, abandonment, drain/tail, retained bytes, output size | `LivePreEncoder.Diagnostics` (same-lock snapshot; nearest-rank percentile pinned by tests) | *Pre-encoder diagnostics* (4) |
+| S3 | Real ScreenCaptureKit 15 s high-motion benchmark — synthetic material proves the encoder only | [RecordingBenchmark.swift](Sources/TriCapApp/RecordingBenchmark.swift): full `RegionRecorder`+`LivePreEncoder` production path, full-region 60 Hz motion driver, compositing-freeze → honest SKIP exit 2 | 24 real recordings logged |
+| S4 | Re-verify fresh evidence | 41.4 ms/frame @1440 confirmed synthetic (worst case); real path measured ~26 ms — synthetic is the upper bound, low-entropy driver the lower | both tables in REVIEW_HANDOFF |
+
+### B. Causal grid smoothing (`80a0289`)
+
+| # | Requirement | Implementation | Verified by |
+|---|---|---|---|
+| S5 | Online/causal; live timestamps never rewritten | snap lives inside `IncrementalTimeline.append`; structural | *Timeline grid smoothing* (13; 20 assertions fail with snapping disabled — proven) |
+| S6 | One rule for live and batch | `ClipTiming` passes `nominalFrameInterval` through; `LivePreEncoder` constructs with the recording's rate | live/batch equivalence over 6 fixture families + real-encoder artifact test |
+| S7 | Absolute grid, snap ≤25% of interval; strict monotonicity + 10 ms step | `IncrementalTimeline` | jitter/alternation/collision/identical-timestamp tests |
+| S8 | Holds ≥2× interval never shortened; endpoint/total/trim unchanged | hold frames left raw; end rule untouched; trim re-anchors | hold (3.85 s exact), boundary, endpoint, floor, trim tests |
+
+### C. Evidence-gated presets (this commit)
+
+| # | Requirement | Result |
+|---|---|---|
+| S9 | 12/20/24/30 fps × 1440/1920, ≥3 consecutive 15 s real recordings each | 24 runs, full table in REVIEW_HANDOFF |
+| S10 | Gates: 0 dropped, 0 abandonment, tail ≤2 s, retained ≤384 MB; 30 fps also p95 ≤26.7 ms or zero-backlog | 12@1440 ✅ · 20@1440 ✅ (3/3) · 24@1440 passes low-entropy runs but fails worst-case synthetic (56/60 backlog, 4.1 s tail) · 30@1440 ❌ (1/3 abandoned, p95 up to 36.8) · 20@1920 ❌ (1/3 abandoned) · 24/30@1920 ❌ (3/3 abandoned, 17–21 s tails) |
+| S11 | First-round ladder: smallerFile 10→**12**, balanced 12→**20**; sharper/highDetail untouched; default stays balanced | applied in [QualityPreset.swift](Sources/TriCapKit/QualityPreset.swift); copy states fps and the size cost |
+| S12 | Custom untouched; no silent migration | stored values are real numbers; old-Balanced users keep 12 fps verbatim and relabel to Custom — pinned by `oldBalancedValuesRelabelAsCustom`; fresh installs derive limits from the default preset |
+| S13 | 24/30 fps and 1920 high-fps stay Custom/unsupported; backlog not enlarged to mask throughput | unchanged `maxBacklog`; gated frame rates pinned by `gatedFrameRates` so a casual bump cannot land without re-running the matrix |
+| S14 | Human playback verification | **pending, user-owned** — recorded as unverified in REVIEW_HANDOFF |
+
+Note flagged for review: the preset ladder is now fps-non-monotonic (…20, 15, 20…) by the locked
+decision itself; the old monotonicity invariant test was narrowed to the quality axes with the
+rationale written next to it.
 
 ## Deliverables
 

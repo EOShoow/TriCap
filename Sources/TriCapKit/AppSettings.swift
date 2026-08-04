@@ -122,7 +122,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
         stillFormat: OutputFormat = .png,
         stillQuality: Int = AppSettings.defaultPreset.values!.stillQuality,
         qualityPreset: QualityPreset = AppSettings.defaultPreset,
-        recordingLimits: RecordingLimits = .default,
+        // Derived from the default preset for the same reason `stillQuality` is: a fresh install
+        // must actually start on the preset it claims. `RecordingLimits.default` stays the
+        // type-neutral 12 fps used by tools and tests that want an explicit baseline.
+        recordingLimits: RecordingLimits = RecordingLimits(
+            frameRate: AppSettings.defaultPreset.values!.recordingFrameRate,
+            maxLongEdgePixels: AppSettings.defaultPreset.values!.recordingLongEdgePixels
+        ),
         animatedWebPOptions: AnimatedWebPOptions = .default,
         countdownSeconds: Int = 3,
         copyReferenceAfterExport: Bool = true,

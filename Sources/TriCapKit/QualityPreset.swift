@@ -47,9 +47,9 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
     public var summary: String {
         switch self {
         case .smallerFile:
-            return "Smallest files. Fine for screenshots of whole windows; small text may soften."
+            return "Smallest files. 12 fps recordings; small text may soften."
         case .balanced:
-            return "TriCap's default. Small text stays readable at a size that pastes comfortably."
+            return "TriCap's default. 20 fps recordings for visibly smoother motion; small text stays readable. Files grow with the extra frames."
         case .sharper:
             return "Keeps thin lines and small text crisp. Files are noticeably larger."
         case .highDetail:
@@ -91,9 +91,13 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
     public var values: Values? {
         switch self {
         case .smallerFile:
-            return Values(stillQuality: 65, recordingLongEdgePixels: 960, recordingFrameRate: 10, animationQuality: 60)
+            return Values(stillQuality: 65, recordingLongEdgePixels: 960, recordingFrameRate: 12, animationQuality: 60)
         case .balanced:
-            return Values(stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 12, animationQuality: 80)
+            // 20 fps, not 24 or 30: the evidence gate, not taste. Measured on this machine's real
+            // ScreenCaptureKit path the pre-encoder holds 20 fps with headroom, while worst-case
+            // synthetic content already pushes 24 fps to a 56/60 backlog and a 4 s export tail and
+            // makes 30 fps abandon outright. See REVIEW_HANDOFF / release plan for the full table.
+            return Values(stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 20, animationQuality: 80)
         case .sharper:
             return Values(stillQuality: 95, recordingLongEdgePixels: 1920, recordingFrameRate: 15, animationQuality: 90)
         case .highDetail:

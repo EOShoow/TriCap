@@ -235,6 +235,29 @@ is a deterministic function of the pixels beneath it, and low block counts over 
 reconstructed. For credentials or keys, the honest tool is a filled rectangle. TriCap's copy says
 "pixelate", never "blur", and never claims irreversibility.
 
+## Frame timing: jitter smoothing and the gated frame-rate ladder
+
+Two Round-9 changes, both driven by a real recording whose 12 fps timeline wobbled 66–100 ms
+between frames.
+
+**Grid smoothing** lives in `IncrementalTimeline` (the one rule both the live pre-encoder and
+`ClipTiming` run): with a nominal interval, timestamps snap to the absolute `k×interval` grid when
+within 25% of it. It is causal — decided per frame on arrival, because the live path writes each
+value into the WebP immediately — and conservative: deviations beyond tolerance are kept (they are
+information), holds of ≥2× the interval are never touched (a static screen's 3.85 s stays 3.85 s),
+and strict monotonicity plus the 10 ms floor always win. Endpoint and trim rules are unchanged.
+
+**The preset frame rates are evidence-gated.** `--benchmark-recording` (real ScreenCaptureKit,
+full production path, full-region motion driver) ran every candidate 3×15 s; `--benchmark-export`
+provides the worst-case synthetic bound. Verdicts on this machine: 20 fps @1440 holds 3/3 with
+tails ≤0.37 s; 24 fps holds only on low-entropy content and fails the worst-case bound; 30 fps
+abandoned pre-encoding in 1 of 3 real runs (12.8 s slow-path tail) and misses the p95 margin gate;
+every ≥20 fps configuration at 1920 px abandons. Hence Balanced = 1440 px @ 20 fps, Sharper keeps
+1920 px @ 15 fps (spending throughput on resolution instead of rate — the ladder is deliberately
+not fps-monotonic), and 24/30 fps remain Custom choices. `gatedFrameRates` pins the numbers so a
+casual bump cannot land without re-running the matrix; stored user values are never migrated
+(old-Balanced users keep 12 fps verbatim and relabel as Custom).
+
 ## Quality presets
 
 `QualityPreset` (in `TriCapKit`) names an outcome — *Smaller file*, *Balanced*, *Sharper*,

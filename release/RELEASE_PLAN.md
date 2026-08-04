@@ -47,8 +47,15 @@ macOS 26.5.2 (build 25F84), Apple Silicon arm64, Swift 6.3.3, two displays
   --deep --strict`).
 - `package-release.sh --local-test`: DMG builds, mounts, contains TriCap.app +
   `/Applications` symlink, app inside verifies.
-- `package-release.sh` (release mode): fails closed with an actionable message when
-  `CODESIGN_IDENTITY_RELEASE` is missing or is not a Developer ID Application identity.
+- `package-release.sh` (release mode) **fails closed, now proven under injected failures**
+  (`scripts/diagnostics/package-release-gate-probe.sh`, no Developer ID required): the official
+  `TriCap-<version>.dmg` name exists only after notarization is literally `Accepted` (JSON,
+  machine-parsed), the staple validates and `spctl` passes on the mounted app — until then the
+  artefact lives under a temporary name in a per-run temp directory. Verdicts of *rejected*,
+  *command failure*, *unparsable output*, *staple failure*, *spctl rejection*, *SIGTERM
+  mid-upload* and *target already exists* each exit non-zero with no officially named file, no
+  temp residue, no lingering mount, and pre-existing dist files byte-identical. The probe also
+  caught (and the fix removed) a trap that reported exit 0 after SIGTERM.
 
 ## Not yet verified
 
@@ -57,7 +64,8 @@ macOS 26.5.2 (build 25F84), Apple Silicon arm64, Swift 6.3.3, two displays
   stable path (`/Applications`) — a bare build directory reports `notFound` by design. Enable the
   login item only after the install path is stable; keep this sentence in end-user docs.
 - **The signed/notarized path of `package-release.sh`** end to end: no Developer ID identity
-  exists on this machine. The gates are tested; the happy path has never run.
+  exists on this machine. Every failure gate is exercised by injection; the *happy* path
+  (real signature, real `Accepted`, real staple, real spctl pass) has never run anywhere.
 - **Any second machine**: clean-machine install, Gatekeeper first-launch flow, macOS 14/15
   behaviour, Intel — all untested.
 - Real-interaction items carried in REVIEW_HANDOFF.md §4 (clicking Stop, F3 press, drag/zoom on

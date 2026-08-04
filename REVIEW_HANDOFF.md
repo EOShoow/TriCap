@@ -33,6 +33,47 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.00000 Round 8b — Codex P1: the packaging script could strand an official-looking DMG
+
+The finding was correct: the previous script created `build/dist/TriCap-<version>.dmg` at its
+final path *before* notarization, and `fail()` exited with no trap — any late failure or
+interruption left an unnotarized file with the official release name, violating the fail-closed
+contract. `rm -rf "$DIST"` at the start could also delete historical products.
+
+Rewritten (`scripts/package-release.sh`):
+
+- The artefact is built as `TriCap-unverified.dmg` inside a per-run `build/dist/.pkg-tmp-XXXXXX`
+  directory. The official name comes into existence only via one atomic same-volume rename,
+  after **all** of: notarytool succeeded *and* its JSON says literally `Accepted`
+  (machine-parsed; unparsable output fails), `stapler staple` + `stapler validate` passed, and
+  `spctl --assess` passed on the app inside the mounted image.
+- EXIT/INT/TERM handlers detach this run's mount and delete this run's temp directory on every
+  path. Nothing else in `build/dist` is ever touched — the blanket `rm -rf` is gone.
+- If the official target already exists, the script refuses before building (and re-checks
+  before the rename): overwriting a shipped artefact is a human decision.
+- `--local-test` unchanged in spirit: still named `…-LOCAL-TEST-adhoc.dmg`, may replace only its
+  own previous file, can never displace a release-named product.
+- Verdict tools are injectable **only** with `TRICAP_PACKAGE_TEST=1`; otherwise absolute system
+  paths are used, so a poisoned PATH cannot substitute them.
+
+Evidence without a Developer ID — `scripts/diagnostics/package-release-gate-probe.sh`, 8
+scenarios, every check green: notary *rejected* / *command crash* / *unparsable output*, staple
+failure, spctl rejection, SIGTERM mid-upload, target-already-exists, plus the real
+`--local-test` build (mounts; contains TriCap.app + `/Applications` symlink; app verifies). Each
+failure scenario asserts non-zero exit, no officially named file, no `.pkg-tmp-*` residue, no
+lingering mount, and a pre-seeded historical DMG byte-identical afterwards.
+
+The probe promptly earned its keep: the first trap implementation re-read `$?` in a shared
+handler, so a SIGTERM during the upload window exited **0**. Signals now have their own handlers
+and exit `128+signal` (observed 143 in the probe).
+
+Still true, stated plainly: the *happy* path — real Developer ID signature, a real `Accepted`,
+real staple, real spctl pass — has never run on any machine. Public release remains **BLOCKED**
+(release/RELEASE_PLAN.md). Separately: the single `SKIP` Codex observed in its selftest run is
+the long-documented display-compositing freeze of this environment (§2 / the
+display-compositing probe), not a product regression — the selftest reports SKIP rather than
+PASS in that state by design.
+
 ## 0.0000 Round 8 — banner layering, system mosaic, login item, release boundary
 
 Four commits on `6eaa9bd`, in review order: `d912523` (A), `6e23723` (B), `a713ccb` (C), and the

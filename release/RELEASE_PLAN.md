@@ -6,6 +6,10 @@ is the single place that says what stands between the current tree and a public 
 **Public release status: `BLOCKED`.** See [blockers](#release-blockers). Nothing may be uploaded,
 no tag or release created, and no Gatekeeper workaround is acceptable, until every blocker clears.
 
+Bilingual source-preview notes are maintained in
+[`RELEASE_NOTES_v0.1.0.md`](RELEASE_NOTES_v0.1.0.md). They deliberately contain no distributable
+DMG link or checksum while the public binary release remains blocked.
+
 ## What the product is right now
 
 | Fact | Value |

@@ -85,7 +85,7 @@ TriCap has no Dock icon — look for the viewfinder icon in the menu bar.
 ./scripts/test.sh
 ```
 
-198 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
+449 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
 `Testing.framework` on the search path unless Xcode is the active developer directory; the script
 adds the `-F` and `-rpath` flags that make `swift test` work with CLT only. With Xcode installed,
 plain `swift test` also works.

@@ -83,6 +83,7 @@ enum RecordingBenchmark {
         var tailSeconds: Double = 0
         var reuseDecisionWasFastPath = false
         var outputBytes = 0
+        var cadence = RecordingCadence(frameCount: 0, wallDuration: 0, requestedFramesPerSecond: 1)
     }
 
     private static func run(
@@ -112,40 +113,60 @@ enum RecordingBenchmark {
         print("== Real-recording benchmark (full RegionRecorder + LivePreEncoder path)")
         print("  requested: \(fps) fps · long edge \(longEdge) px · \(Int(seconds)) s · quality \(options.quality) · method \(options.method) · runs \(runs)")
 
-        // The driver churns most of the region so libwebp cannot coalesce its way to an easy
-        // result — this is the "genuinely high-motion" content the gates are defined against.
-        let driver = HighMotionDriver(region: region)
-        driver.show()
-        defer { driver.hide() }
-
-        // Compositing-liveness probe, verbatim from the selftest's reasoning: a sleeping display
-        // keeps serving one frozen composite and every number below would be meaningless.
-        var compositingIsLive = false
-        do {
-            let before = try await StillCaptureService.capture(region: region)
-            driver.step(3)
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            let after = try await StillCaptureService.capture(region: region)
-            compositingIsLive = ImageProcessing.pngData(from: before.image)
-                != ImageProcessing.pngData(from: after.image)
-        } catch {
-            compositingIsLive = false
-        }
-        guard compositingIsLive else {
-            print("SKIPPED: the screen is not compositing live (two stills around a deliberate")
-            print("         change are byte-identical). Re-run under `caffeinate -dimsu` with the")
-            print("         display awake. No numbers are reported from a frozen composite.")
-            return 2
-        }
-
         var all: [RunMetrics] = []
         for runIndex in 1...runs {
-            let metrics = try await singleRun(
-                region: region, fps: fps, longEdge: longEdge, seconds: seconds,
-                options: options, directory: directory, label: "run\(runIndex)"
-            )
-            all.append(metrics)
+            // Give every SCStream a fresh WindowServer surface. Reusing one excepted own window
+            // across sequential streams can leave later streams with only their initial frame.
+            let driver = HighMotionDriver(region: region)
+            driver.show()
+            guard let driverWindowID = driver.windowID else {
+                driver.hide()
+                print("SKIPPED: the benchmark motion window did not receive a WindowServer ID.")
+                return 2
+            }
+            let includedOwnWindowIDs: Set<CGWindowID> = [driverWindowID]
+            try? await Task.sleep(nanoseconds: 200_000_000)
+
+            // Validate every run rather than extrapolating the first liveness probe over a matrix.
+            guard await compositingIsLive(
+                region: region,
+                driver: driver,
+                includedOwnWindowIDs: includedOwnWindowIDs,
+                label: "run \(runIndex)"
+            ) else {
+                driver.hide()
+                print("SKIPPED: the screen is not compositing the benchmark driver live.")
+                print("         Re-run under `caffeinate -dimsu` with the display awake.")
+                return 2
+            }
+
+            let metrics: RunMetrics
+            do {
+                metrics = try await singleRun(
+                    region: region, fps: fps, longEdge: longEdge, seconds: seconds,
+                    options: options, directory: directory, label: "run\(runIndex)",
+                    includedOwnWindowIDs: includedOwnWindowIDs,
+                    driver: driver
+                )
+            } catch {
+                driver.hide()
+                throw error
+            }
             report(metrics, label: "run \(runIndex)")
+
+            guard await compositingIsLive(
+                region: region,
+                driver: driver,
+                includedOwnWindowIDs: includedOwnWindowIDs,
+                label: "run \(runIndex) post"
+            ) else {
+                driver.hide()
+                print("SKIPPED: compositing froze during run \(runIndex); its metrics are invalid.")
+                print("         No gate verdict may be derived from this benchmark invocation.")
+                return 2
+            }
+            driver.hide()
+            all.append(metrics)
         }
 
         print("\n  -- medians over \(runs) run(s) --")
@@ -165,13 +186,44 @@ enum RecordingBenchmark {
         return 0
     }
 
+    private static func compositingIsLive(
+        region: CaptureRegion,
+        driver: HighMotionDriver,
+        includedOwnWindowIDs: Set<CGWindowID>,
+        label: String
+    ) async -> Bool {
+        do {
+            let before = try await StillCaptureService.capture(
+                region: region,
+                includingOwnWindowIDs: includedOwnWindowIDs
+            )
+            driver.step(3)
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            let after = try await StillCaptureService.capture(
+                region: region,
+                includingOwnWindowIDs: includedOwnWindowIDs
+            )
+            let changedFraction = sampledChangeFraction(before.image, after.image) ?? 0
+            print(String(format: "  %@ liveness: %.1f%% of sampled pixels changed", label, changedFraction * 100))
+            return changedFraction >= 0.20
+        } catch {
+            return false
+        }
+    }
+
     private static func singleRun(
         region: CaptureRegion, fps: Int, longEdge: Int, seconds: TimeInterval,
-        options: AnimatedWebPOptions, directory: URL, label: String
+        options: AnimatedWebPOptions, directory: URL, label: String,
+        includedOwnWindowIDs: Set<CGWindowID>,
+        driver: HighMotionDriver
     ) async throws -> RunMetrics {
         var metrics = RunMetrics()
         let limits = RecordingLimits(frameRate: fps, maxDuration: seconds, maxLongEdgePixels: longEdge)
-        let recorder = RegionRecorder(region: region, limits: limits)
+        let recorder = RegionRecorder(
+            region: region,
+            limits: limits,
+            includingOwnWindowIDs: includedOwnWindowIDs
+        )
 
         // Wired exactly as AppDelegate.recordClip does it.
         let preEncoder = LivePreEncoder(
@@ -182,7 +234,15 @@ enum RecordingBenchmark {
         }
 
         try await recorder.start()
-        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        // Advance explicitly instead of relying on a repeating Timer. Headless benchmark runs can
+        // stop servicing an idle app's timer while ScreenCaptureKit remains alive, producing one
+        // frame and a fictitious low-load result. This causal loop keeps the workload active for
+        // the entire measured wall-clock interval.
+        let motionStart = ContinuousClock.now
+        while ExportBenchmark.elapsed(since: motionStart) < seconds {
+            driver.step()
+            try? await Task.sleep(nanoseconds: 16_666_667)
+        }
         let clip = try await recorder.finish()
 
         metrics.frames = clip.frames.count
@@ -190,6 +250,11 @@ enum RecordingBenchmark {
         metrics.retainedBytes = clip.retainedBytes
         metrics.wallDuration = clip.wallClockDuration
         metrics.stopReason = clip.stopReason.rawValue
+        metrics.cadence = RecordingCadence(
+            frameCount: clip.frames.count,
+            wallDuration: clip.wallClockDuration,
+            requestedFramesPerSecond: fps
+        )
 
         // Drain: how long finish() blocks waiting for the queue — the pre-encode share of the tail.
         let timeline = ClipTiming.timeline(
@@ -240,11 +305,49 @@ enum RecordingBenchmark {
         print("""
           \(label): \(m.frames) frames (\(String(format: "%.2f", m.wallDuration)) s, stop=\(m.stopReason)) · dropped \(m.dropped) \
         · retained \(m.retainedBytes / 1_048_576) MB PNG
+            delivered \(String(format: "%.1f", m.cadence.deliveredFramesPerSecond)) fps \
+        (\(String(format: "%.1f", m.cadence.deliveryRatio * 100))% of request; ~\(m.cadence.estimatedMissingIntervals) intervals not delivered)
+            cadence gate \(m.cadence.deliveryRatio >= 0.95 ? "PASS" : "FAIL") (requires ≥95% delivery)
             encode p50 \(p50) / p95 \(p95) ms · peak backlog \(m.peakBacklog)/\(m.backlogLimit) \
         · abandonment: \(m.abandonment ?? "none")
             drain \(String(format: "%.2f", m.drainSeconds)) s · export tail \(String(format: "%.2f", m.tailSeconds)) s \
         (\(m.reuseDecisionWasFastPath ? "fast path" : "SLOW PATH")) · output \(m.outputBytes / 1024) KB
         """)
+    }
+
+    /// Compare a fixed 64×64 sample of two captures. A single unrelated cursor blink must not make
+    /// the benchmark claim that its near-full-screen driver is visible; the driver changes most of
+    /// the sampled pixels on every step.
+    private static func sampledChangeFraction(_ lhs: CGImage, _ rhs: CGImage) -> Double? {
+        let side = 64
+        let bytesPerRow = side * 4
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+
+        func pixels(_ image: CGImage) -> [UInt8]? {
+            var data = [UInt8](repeating: 0, count: side * bytesPerRow)
+            guard let context = CGContext(
+                data: &data,
+                width: side,
+                height: side,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return nil }
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return data
+        }
+
+        guard let a = pixels(lhs), let b = pixels(rhs), a.count == b.count else { return nil }
+        var changed = 0
+        for offset in stride(from: 0, to: a.count, by: 4) {
+            let delta = abs(Int(a[offset]) - Int(b[offset]))
+                + abs(Int(a[offset + 1]) - Int(b[offset + 1]))
+                + abs(Int(a[offset + 2]) - Int(b[offset + 2]))
+            if delta >= 24 { changed += 1 }
+        }
+        return Double(changed) / Double(side * side)
     }
 }
 
@@ -256,9 +359,13 @@ private final class HighMotionDriver {
     private let window: NSWindow
     private let background: NSView
     private var blocks: [NSView] = []
-    private var timer: Timer?
     private var frameIndex = 0
     private let regionRect: CGRect
+
+    var windowID: CGWindowID? {
+        let number = window.windowNumber
+        return number > 0 ? CGWindowID(number) : nil
+    }
 
     init(region: CaptureRegion) {
         regionRect = region.appKitGlobalRect
@@ -287,11 +394,6 @@ private final class HighMotionDriver {
 
     func show() {
         window.orderFrontRegardless()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
     }
 
     func step(_ times: Int = 1) {
@@ -318,8 +420,6 @@ private final class HighMotionDriver {
     }
 
     func hide() {
-        timer?.invalidate()
-        timer = nil
         window.orderOut(nil)
         window.close()
     }

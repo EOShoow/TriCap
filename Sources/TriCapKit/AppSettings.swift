@@ -261,20 +261,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
         recordingLimits = try c.decodeIfPresent(RecordingLimits.self, forKey: .recordingLimits) ?? fallback.recordingLimits
         animatedWebPOptions = try c.decodeIfPresent(AnimatedWebPOptions.self, forKey: .animatedWebPOptions) ?? fallback.animatedWebPOptions
 
-        // A blob written before presets existed has no `qualityPreset` key. Rather than assuming
-        // a preset — which would rewrite whatever quality the user had been getting — the stored
-        // values decide: they map to a preset only if they match one exactly, and otherwise the
-        // settings load as `.custom` with every number preserved.
-        // The raw value is read as a plain `String` so a preset renamed since the blob was
-        // written can be mapped forward (see `QualityPreset.renamedRawValues`). A value from a
-        // *newer* build is still unknown and falls back to `.custom`, which keeps every stored
-        // number. Decoding the enum strictly would throw, and the caller's `try?` would then
-        // discard the entire settings blob over one unrecognised string.
-        let storedPresetRawValue = try? c.decodeIfPresent(String.self, forKey: .qualityPreset)
-        qualityPreset = storedPresetRawValue.flatMap(QualityPreset.fromPersistedRawValue) ?? .custom
+        // `qualityPreset` is a derived label, so persisted numbers are the authority at the load
+        // boundary too. This keeps every old/custom value verbatim while preventing a stale label
+        // (for example the withdrawn 20 fps Balanced preset) from promising today's 12 fps values.
+        qualityPreset = .custom
         countdownSeconds = (try c.decodeIfPresent(Int.self, forKey: .countdownSeconds) ?? fallback.countdownSeconds).clamped(to: Self.countdownRange)
         copyReferenceAfterExport = try c.decodeIfPresent(Bool.self, forKey: .copyReferenceAfterExport) ?? fallback.copyReferenceAfterExport
         copyImageAfterExport = try c.decodeIfPresent(Bool.self, forKey: .copyImageAfterExport) ?? fallback.copyImageAfterExport
         filenamePrefix = try c.decodeIfPresent(String.self, forKey: .filenamePrefix) ?? fallback.filenamePrefix
+        qualityPreset = QualityPreset.matching(qualityValues)
     }
 }

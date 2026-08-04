@@ -76,6 +76,15 @@ struct TimelineSmoothingTests {
         #expect(out == [0, 167], "kept raw (rounded), not pulled to a different tick")
     }
 
+    @Test("A hold keeps its real duration after the preceding frame snapped forward")
+    func holdAfterForwardSnapPreservesDuration() {
+        // 66 ms snaps forward to 83 ms. The following raw gap is 174 ms, which is a real hold.
+        // Measuring it from the emitted 83 ms value misclassifies it as 157 ms and shortens it.
+        let out = snapped([0, 0.066, 0.240], interval: fps12)
+        #expect(out == [0, 83, 257])
+        #expect(out[2] - out[1] == 174, "the raw 174 ms hold duration must survive exactly")
+    }
+
     // MARK: - Monotonicity and collisions
 
     @Test("Two frames snapping to the same tick stay strictly monotonic")

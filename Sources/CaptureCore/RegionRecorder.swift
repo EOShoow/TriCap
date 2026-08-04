@@ -43,6 +43,7 @@ public final class RegionRecorder {
     private let region: CaptureRegion
     private let limits: RecordingLimits
     private let showsCursor: Bool
+    private let includedOwnWindowIDs: Set<CGWindowID>
     private let outputPixelSize: CGSize
 
     private let buffer: FrameBuffer
@@ -72,10 +73,16 @@ public final class RegionRecorder {
 
     private let sampleQueue = DispatchQueue(label: "app.tricap.capture.samples", qos: .userInitiated)
 
-    public init(region: CaptureRegion, limits: RecordingLimits, showsCursor: Bool = false) {
+    public init(
+        region: CaptureRegion,
+        limits: RecordingLimits,
+        showsCursor: Bool = false,
+        includingOwnWindowIDs: Set<CGWindowID> = []
+    ) {
         self.region = region
         self.limits = limits
         self.showsCursor = showsCursor
+        self.includedOwnWindowIDs = includingOwnWindowIDs
         self.outputPixelSize = CaptureConfiguration.outputPixelSize(
             for: region,
             maxLongEdge: limits.maxLongEdgePixels
@@ -90,7 +97,11 @@ public final class RegionRecorder {
         guard state == .idle else { return }
 
         let content = try await ScreenRecordingPermission.shareableContent()
-        let filter = try CaptureConfiguration.filter(for: region, content: content)
+        let filter = try CaptureConfiguration.filter(
+            for: region,
+            content: content,
+            includingOwnWindowIDs: includedOwnWindowIDs
+        )
         let config = CaptureConfiguration.recordingConfiguration(
             region: region,
             outputPixelSize: outputPixelSize,

@@ -27,42 +27,42 @@ struct QualityPresetTests {
 
     @Test("Presets are ordered from smallest to largest on the quality axes")
     func presetsAreMonotonic() {
-        // Frame rate is deliberately NOT on this list any more. The ladder is a quality ladder —
-        // still quality, resolution and animation quality all rise monotonically — but fps is a
-        // throughput trade against resolution: Balanced runs 1440 px at 20 fps (measured to hold
-        // on the real capture path), while Sharper spends the same budget on 1920 px at 15 fps.
-        // Making fps monotonic again would mean raising Sharper past what the pre-encoder
-        // sustains at 1920 px (it abandons at 20 fps there on worst-case content) or capping
-        // Balanced below what it can honestly deliver.
         let ordered = QualityPreset.selectable.compactMap(\.values)
         for (a, b) in zip(ordered, ordered.dropFirst()) {
             #expect(b.stillQuality >= a.stillQuality)
             #expect(b.recordingLongEdgePixels >= a.recordingLongEdgePixels)
+            #expect(b.recordingFrameRate >= a.recordingFrameRate)
             #expect(b.animationQuality >= a.animationQuality)
         }
     }
 
-    @Test("The evidence-gated frame rates are exactly the shipped ones")
-    func gatedFrameRates() {
-        // Pinned so a casual "just bump it to 30" cannot land without re-running the gate matrix
-        // (release plan: 0 dropped frames, no pre-encode abandonment, tail ≤ 2 s, retained
-        // ≤ 384 MB, and for 30 fps a p95 encode ≤ 26.7 ms that no measured configuration meets).
+    @Test("The guarded frame rates are exactly the shipped ones")
+    func guardedFrameRates() {
+        // Pinned so a future promotion cannot land without a corrected gate matrix that also
+        // measures actual SCK delivery cadence and validates compositing before and after each run.
         #expect(QualityPreset.smallerFile.values?.recordingFrameRate == 12)
-        #expect(QualityPreset.balanced.values?.recordingFrameRate == 20)
+        #expect(QualityPreset.balanced.values?.recordingFrameRate == 12)
         #expect(QualityPreset.sharper.values?.recordingFrameRate == 15)
         #expect(QualityPreset.highDetail.values?.recordingFrameRate == 20)
     }
 
-    @Test("A pre-upgrade Balanced user keeps their exact values and becomes Custom")
-    func oldBalancedValuesRelabelAsCustom() {
-        // Stored settings hold real numbers; the preset label is derived by matching. Changing
-        // the Balanced definition therefore must not touch anyone's stored 12 fps — their label
-        // flips to Custom and every number stays exactly as they had it. Nobody's recordings
-        // change behind their back; picking Balanced again opts into the new 20 fps.
-        let oldBalanced = QualityPreset.Values(
-            stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 12, animationQuality: 80
+    @Test("A stale preset label cannot override its stored values")
+    func stalePresetLabelRelabelsFromValues() throws {
+        // The withdrawn 20 fps build wrote this exact blob. Rolling the preset back must preserve
+        // all four real numbers and display Custom, rather than falsely claiming today's 12 fps
+        // Balanced values. No recording parameter is migrated.
+        let withdrawnBalanced = QualityPreset.Values(
+            stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 20, animationQuality: 80
         )
-        #expect(QualityPreset.matching(oldBalanced) == .custom)
+        #expect(QualityPreset.matching(withdrawnBalanced) == .custom)
+
+        // Exercise the real persisted representation, including the stale label written by the
+        // previous release. The decoder is the load boundary used by SettingsStore.
+        let persisted = try JSONDecoder().decode(AppSettings.self, from: Data(
+            #"{"qualityPreset":"balanced","stillQuality":85,"recordingLimits":{"frameRate":20,"maxDuration":15,"maxLongEdgePixels":1440,"maxFrameBufferBytes":536870912},"animatedWebPOptions":{"quality":80,"loopCount":0,"lossless":false,"method":4}}"#.utf8
+        ))
+        #expect(persisted.qualityPreset == .custom)
+        #expect(persisted.qualityValues == withdrawnBalanced)
     }
 
     @Test("Every preset's values are inside the ranges the encoders accept")
@@ -227,27 +227,23 @@ struct SettingsMigrationTests {
 
     @Test("A legacy blob that happens to match a preset is still loaded verbatim")
     func legacyBlobMatchingAPreset() throws {
-        // Uses the CURRENT Balanced numbers (20 fps). A blob carrying the pre-upgrade 12 fps
-        // values is the other case: loaded verbatim and reconciled to .custom — pinned by
-        // `oldBalancedValuesRelabelAsCustom`.
+        // Uses the current Balanced numbers. The persisted values remain authoritative.
         let legacy = """
         {"stillQuality": 85,
-         "recordingLimits": {"frameRate": 20, "maxDuration": 15, "maxLongEdgePixels": 1440, "maxFrameBufferBytes": 536870912},
+         "recordingLimits": {"frameRate": 12, "maxDuration": 15, "maxLongEdgePixels": 1440, "maxFrameBufferBytes": 536870912},
          "animatedWebPOptions": {"quality": 80, "loopCount": 0, "lossless": false, "method": 4}}
         """
         let settings = try decode(legacy)
         #expect(settings.qualityValues == QualityPreset.balanced.values)
-        // Decoding does not relabel; the store reconciles on first edit, and the values are already
-        // right either way.
-        #expect(settings.reconciledForQualityPreset().qualityPreset == .balanced)
+        #expect(settings.qualityPreset == .balanced)
     }
 
     @Test("An empty blob falls back to the shipped defaults")
     func emptyBlob() throws {
         let settings = try decode("{}")
         #expect(settings.stillQuality == AppSettings.defaultPreset.values!.stillQuality)
-        // The shipped default is the preset-derived one (20 fps Balanced), not the type-neutral
-        // `RecordingLimits.default` baseline.
+        // The shipped default is preset-derived Balanced, not an independent mutable label or
+        // the type-neutral `RecordingLimits.default` baseline.
         #expect(settings.recordingLimits == AppSettings().recordingLimits)
         #expect(settings.recordingLimits.frameRate == QualityPreset.balanced.values?.recordingFrameRate)
     }
@@ -330,10 +326,11 @@ struct SettingsMigrationTests {
         #expect(settings.filenamePrefix == "Keep", "the rest of the blob must survive")
     }
 
-    @Test("A known preset raw value still decodes")
-    func knownPresetDecodes() throws {
+    @Test("A stored preset label cannot override fallback encoder values")
+    func knownPresetLabelIsDerivedFromValues() throws {
         let settings = try decode(#"{"qualityPreset": "sharper"}"#)
-        #expect(settings.qualityPreset == .sharper)
+        #expect(settings.qualityPreset == .balanced)
+        #expect(settings.qualityValues == AppSettings.defaultPreset.values)
     }
 
     @Test("An out-of-range legacy value is clamped rather than rejected")

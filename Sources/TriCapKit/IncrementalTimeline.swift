@@ -53,6 +53,9 @@ public struct IncrementalTimeline: Sendable {
     private let gridMs: Double?
     private let toleranceMs: Double
     private var base: TimeInterval?
+    /// Previous capture time on the raw, base-relative axis. Hold detection must use this rather
+    /// than the previous emitted timestamp, which may already have moved onto the grid.
+    private var previousRawMs: Double?
 
     public init(
         minimumStepMs: Int = IncrementalTimeline.defaultMinimumStepMs,
@@ -77,6 +80,7 @@ public struct IncrementalTimeline: Sendable {
     public mutating func append(captureTimestamp: TimeInterval) -> Int {
         guard let base else {
             self.base = captureTimestamp
+            previousRawMs = 0
             timestampsMs.append(0)
             return 0
         }
@@ -87,13 +91,14 @@ public struct IncrementalTimeline: Sendable {
 
         var value = raw
         if let gridMs {
-            // The gap is measured against the previous *emitted* value. That is the causal choice
-            // — it is the number already written into the file — and it is conservative: a
-            // previous frame snapped downward can only make a gap look longer, i.e. more likely
-            // to be treated as a hold and left alone.
-            let gapMs = rawMs - Double(previous)
-            let isHold = gapMs >= Self.holdThresholdIntervals * gridMs
-            if !isHold {
+            let rawGapMs = rawMs - (previousRawMs ?? rawMs)
+            let isHold = rawGapMs >= Self.holdThresholdIntervals * gridMs
+            if isHold {
+                // Preserve the real duration relative to the already-emitted frame. Keeping only
+                // the new raw absolute timestamp would still shorten or lengthen the hold when
+                // the preceding frame had snapped in either direction.
+                value = previous + Int(rawGapMs.rounded())
+            } else {
                 let tickMs = (rawMs / gridMs).rounded() * gridMs
                 if abs(rawMs - tickMs) <= toleranceMs {
                     value = Int(tickMs.rounded())
@@ -102,6 +107,7 @@ public struct IncrementalTimeline: Sendable {
         }
 
         value = max(value, previous + minimumStepMs)
+        previousRawMs = rawMs
         timestampsMs.append(value)
         return value
     }

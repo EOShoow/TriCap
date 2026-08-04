@@ -33,7 +33,56 @@ The working tree is left exactly as verified below.
 
 ---
 
-## 0.00000000 Round 9 — Animated WebP smoothness: observe, smooth, gate
+## 0.000000000 Round 9a — Codex direct repair: truthful capture load, settings and holds
+
+Independent acceptance invalidated the Round-9 preset promotion and produced three source-level
+repairs plus one newly observable gate:
+
+1. **The “high-motion” window was absent from every capture.** `CaptureConfiguration` excludes all
+   windows belonging to `Bundle.main`; the benchmark driver was such a window. Before repair a
+   3 s / 20 fps run produced only 90 KB and encode p50 3.6 ms. The benchmark can now request one
+   explicit own-window exception; `CaptureConfiguration` intersects the request with windows that
+   actually belong to TriCap, while all production callers keep the empty default. A corrected
+   3 s probe changed **92.1%** of sampled pixels, produced **261 KB**, and measured p50 **24.6 ms**.
+   Liveness now requires ≥20% sampled-pixel change before **and after every run**, and every stream
+   receives a fresh driver surface.
+2. **`dropped=0` did not mean the requested cadence arrived.** It only counted frames TriCap
+   received but failed to retain. `RecordingCadence` now reports actual delivered fps, delivery
+   ratio and estimated SCK intervals not delivered; the runtime gate requires ≥95% delivery.
+3. **Stored preset labels could disagree with stored encoder values.** `AppSettings` now derives
+   the label during decoding. No value is migrated: existing 12 fps Balanced remains Balanced;
+   a blob written by the withdrawn 20 fps build keeps 20 fps verbatim and displays Custom.
+4. **A hold after a forward grid snap could be shortened.** Hold detection now uses consecutive
+   raw capture times, then reapplies the raw duration relative to the prior emitted timestamp.
+   Regression: `[0, 66, 240] ms` emits `[0, 83, 257]`, preserving the real 174 ms hold exactly.
+
+### Corrected gate status
+
+The required 3×15 s real-capture matrix is **not verified on this machine**. Corrected runs proved
+the workload for short intervals, but the display compositor freezes during long automation even
+under `caffeinate -dimsu`; the new pre/post probe returns SKIP (exit 2) rather than accepting those
+numbers. Therefore Round 9's Balanced 12→20 promotion is withdrawn: shipped rates are again
+**12, 12, 15, 20**, and the fps monotonicity invariant is restored. Promotion to 20/24/30 requires
+a complete corrected matrix with ≥95% cadence, zero app drops, zero pre-encode abandonment,
+tail ≤2 s and retained PNG memory ≤384 MB. Human browser/Obsidian playback remains pending.
+
+### Round 9a verification
+
+- `./scripts/test.sh`: **473 tests in 66 suites passed**.
+- Clean Debug and Release builds passed; both bundles passed the build script's dependency audit
+  and `codesign --verify --deep --strict`; the Release `Info.plist` passed `plutil -lint`.
+- Release selftest: **all executed checks passed, 1 environment SKIP**. The skipped multi-frame
+  recording check reported a frozen display composite, matching the corrected benchmark's refusal
+  to treat a long run as evidence.
+- Corrected 3 s / 12 fps probes delivered 11.8 fps (98.2–98.6% of request) with the motion driver
+  visibly present. A corrected 15 s probe degraded to 7.7 fps (64.1%) and failed its post-run
+  liveness check, so it was rejected rather than entered into the preset gate.
+
+## 0.00000000 Round 9 — original handoff (gate evidence invalidated by Round 9a)
+
+> Historical record only. The matrix and promotion claims below were produced before the driver
+> exclusion and missing-cadence defects were found. Do not use them as release evidence; Round 9a
+> and the current REQUIREMENTS/ARCHITECTURE sections supersede them.
 
 Three commits in phase order (`0cf1e9a` observability, `80a0289` causal smoothing, this one
 evidence-gated presets), per the confirmed brief. The trigger was a real user recording whose

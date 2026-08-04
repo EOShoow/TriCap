@@ -10,9 +10,17 @@ public enum StillCaptureService {
     ///
     /// Stills are *not* subject to the animated-WebP long-edge cap — a screenshot should keep
     /// full Retina detail. The cap only exists to bound recording memory.
-    public static func capture(region: CaptureRegion, showsCursor: Bool = false) async throws -> CapturedStill {
+    public static func capture(
+        region: CaptureRegion,
+        showsCursor: Bool = false,
+        includingOwnWindowIDs: Set<CGWindowID> = []
+    ) async throws -> CapturedStill {
         let content = try await ScreenRecordingPermission.shareableContent()
-        let filter = try CaptureConfiguration.filter(for: region, content: content)
+        let filter = try CaptureConfiguration.filter(
+            for: region,
+            content: content,
+            includingOwnWindowIDs: includingOwnWindowIDs
+        )
         let config = CaptureConfiguration.streamConfiguration(
             region: region,
             outputPixelSize: region.nativePixelSize,

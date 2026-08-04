@@ -244,19 +244,22 @@ between frames.
 `ClipTiming` run): with a nominal interval, timestamps snap to the absolute `k×interval` grid when
 within 25% of it. It is causal — decided per frame on arrival, because the live path writes each
 value into the WebP immediately — and conservative: deviations beyond tolerance are kept (they are
-information), holds of ≥2× the interval are never touched (a static screen's 3.85 s stays 3.85 s),
-and strict monotonicity plus the 10 ms floor always win. Endpoint and trim rules are unchanged.
+information). Hold detection uses the raw capture gap; a gap ≥2× the interval reapplies that raw
+duration relative to the prior emitted frame, so an earlier grid snap cannot shorten it (a static
+screen's 3.85 s stays 3.85 s). Strict monotonicity plus the 10 ms floor always win. Endpoint and
+trim rules are unchanged.
 
-**The preset frame rates are evidence-gated.** `--benchmark-recording` (real ScreenCaptureKit,
-full production path, full-region motion driver) ran every candidate 3×15 s; `--benchmark-export`
-provides the worst-case synthetic bound. Verdicts on this machine: 20 fps @1440 holds 3/3 with
-tails ≤0.37 s; 24 fps holds only on low-entropy content and fails the worst-case bound; 30 fps
-abandoned pre-encoding in 1 of 3 real runs (12.8 s slow-path tail) and misses the p95 margin gate;
-every ≥20 fps configuration at 1920 px abandons. Hence Balanced = 1440 px @ 20 fps, Sharper keeps
-1920 px @ 15 fps (spending throughput on resolution instead of rate — the ladder is deliberately
-not fps-monotonic), and 24/30 fps remain Custom choices. `gatedFrameRates` pins the numbers so a
-casual bump cannot land without re-running the matrix; stored user values are never migrated
-(old-Balanced users keep 12 fps verbatim and relabel as Custom).
+**The preset frame rates are evidence-gated.** Independent review found that the original
+`--benchmark-recording` driver was a TriCap window and therefore excluded by the production filter;
+its 24-run “real” matrix measured mostly the background. The corrected harness grants a benchmark-
+only exception to exactly that window, requires ≥20% sampled-pixel change before and after every
+run, uses a fresh surface per SCStream, and reports actual SCK cadence in addition to application-
+level dropped frames. A corrected short probe changed 92.1% of pixels and increased the 3 s output
+from 90 KB to 261 KB, proving the workload is now captured. This machine freezes compositing during
+long automated runs even under `caffeinate`, so the required 3×15 s matrix remains unverified and
+exits SKIP rather than manufacturing a verdict. Balanced therefore stays 1440 px @ 12 fps; 20/24/30
+fps are not promoted until a valid matrix satisfies ≥95% delivery, zero app drops/abandonment,
+tail ≤2 s and retained memory ≤384 MB. Stored numeric values remain authoritative: no migration.
 
 ## Quality presets
 

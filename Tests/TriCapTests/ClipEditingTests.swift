@@ -241,7 +241,9 @@ struct ClipTimingTests {
         for (a, b) in zip(timeline.timestampsMs, timeline.timestampsMs.dropFirst()) {
             #expect(b > a)
         }
-        #expect(timeline.timestampsMs == [0, 10, 20, 500])
+        // The first three raw times collide and therefore consume two artificial 10 ms steps.
+        // The following 499.8 ms real hold is preserved relative to that emitted 20 ms frame.
+        #expect(timeline.timestampsMs == [0, 10, 20, 520])
         #expect(timeline.endTimestampMs > timeline.timestampsMs.last!)
     }
 

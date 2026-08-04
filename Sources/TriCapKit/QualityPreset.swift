@@ -49,7 +49,7 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
         case .smallerFile:
             return "Smallest files. 12 fps recordings; small text may soften."
         case .balanced:
-            return "TriCap's default. 20 fps recordings for visibly smoother motion; small text stays readable. Files grow with the extra frames."
+            return "TriCap's default. 12 fps recordings with steadier frame timing; small text stays readable."
         case .sharper:
             return "Keeps thin lines and small text crisp. Files are noticeably larger."
         case .highDetail:
@@ -93,11 +93,10 @@ public enum QualityPreset: String, Codable, CaseIterable, Sendable, Identifiable
         case .smallerFile:
             return Values(stillQuality: 65, recordingLongEdgePixels: 960, recordingFrameRate: 12, animationQuality: 60)
         case .balanced:
-            // 20 fps, not 24 or 30: the evidence gate, not taste. Measured on this machine's real
-            // ScreenCaptureKit path the pre-encoder holds 20 fps with headroom, while worst-case
-            // synthetic content already pushes 24 fps to a 56/60 backlog and a 4 s export tail and
-            // makes 30 fps abandon outright. See REVIEW_HANDOFF / release plan for the full table.
-            return Values(stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 20, animationQuality: 80)
+            // The attempted 20 fps promotion was withdrawn after its benchmark driver was found
+            // to be excluded from capture and SCK cadence shortfalls were not measured. Keep the
+            // proven 12 fps default until a corrected 3×15 s gate can run without compositor SKIP.
+            return Values(stillQuality: 85, recordingLongEdgePixels: 1440, recordingFrameRate: 12, animationQuality: 80)
         case .sharper:
             return Values(stillQuality: 95, recordingLongEdgePixels: 1920, recordingFrameRate: 15, animationQuality: 90)
         case .highDetail:

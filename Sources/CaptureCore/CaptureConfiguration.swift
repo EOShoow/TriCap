@@ -13,7 +13,11 @@ enum CaptureConfiguration {
 
     /// Resolve the SCK display matching our region, and build a filter that excludes TriCap's own
     /// windows so the recording HUD and the menu-bar highlight never end up in the output.
-    static func filter(for region: CaptureRegion, content: SCShareableContent) throws -> SCContentFilter {
+    static func filter(
+        for region: CaptureRegion,
+        content: SCShareableContent,
+        includingOwnWindowIDs requestedOwnWindowIDs: Set<CGWindowID> = []
+    ) throws -> SCContentFilter {
         guard let display = content.displays.first(where: { $0.displayID == region.display.displayID }) else {
             throw TriCapError.noDisplaysAvailable
         }
@@ -22,7 +26,30 @@ enum CaptureConfiguration {
         if ownApps.isEmpty {
             return SCContentFilter(display: display, excludingWindows: [])
         }
-        return SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
+        let availableOwnWindowIDs = Set(content.windows.compactMap { window -> CGWindowID? in
+            guard window.owningApplication?.bundleIdentifier == ownBundleID else { return nil }
+            return window.windowID
+        })
+        let exceptionIDs = validatedOwnWindowExceptionIDs(
+            requested: requestedOwnWindowIDs,
+            availableOwnWindowIDs: availableOwnWindowIDs
+        )
+        let exceptingWindows = content.windows.filter { exceptionIDs.contains($0.windowID) }
+        return SCContentFilter(
+            display: display,
+            excludingApplications: ownApps,
+            exceptingWindows: exceptingWindows
+        )
+    }
+
+    /// Only windows that both belong to TriCap and were named explicitly can bypass the normal
+    /// self-exclusion rule. Production callers request none; the recording benchmark requests its
+    /// synthetic motion window so the workload is genuinely present in the captured frames.
+    static func validatedOwnWindowExceptionIDs(
+        requested: Set<CGWindowID>,
+        availableOwnWindowIDs: Set<CGWindowID>
+    ) -> Set<CGWindowID> {
+        requested.intersection(availableOwnWindowIDs)
     }
 
     /// Shared configuration for both capture paths.

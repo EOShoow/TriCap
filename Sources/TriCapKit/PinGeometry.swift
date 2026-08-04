@@ -195,6 +195,20 @@ public enum PinOpacity {
     }
 }
 
+/// How a pin looks, as far as that is a testable number.
+public enum PinAppearance {
+    /// One radius for every pin, in points — display-only. Copy and Save always hand back the
+    /// original pixels; the rounding lives on the window's layer, never in the bitmap.
+    public static let cornerRadius: CGFloat = 12
+
+    /// The radius actually applied: uniform, but never so large that a tiny pin turns into a
+    /// capsule — capped at half the short edge, and never negative.
+    public static func effectiveCornerRadius(for size: CGSize) -> CGFloat {
+        let shortEdge = max(0, min(size.width, size.height))
+        return min(cornerRadius, shortEdge / 2)
+    }
+}
+
 /// Which pin "the frontmost pin" means, tracked explicitly.
 ///
 /// This used to be derived from `NSApp.windows.firstIndex(of:)`, on the assumption that AppKit

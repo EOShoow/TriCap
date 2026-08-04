@@ -1251,6 +1251,27 @@ enum CaptureSelfTest {
                           $0.collectionBehavior.contains(.canJoinAllSpaces)
                               && $0.collectionBehavior.contains(.fullScreenAuxiliary)
                       })
+
+                // Rounded corners, proven on the rendered pixels rather than trusting the layer
+                // property: the very corner must be punched transparent, the centre opaque.
+                if let pin = visible.first, let content = pin.contentView {
+                    check("the pin's layer carries the shared corner radius",
+                          content.layer?.cornerRadius
+                              == PinAppearance.effectiveCornerRadius(for: pin.frame.size),
+                          detail: "radius=\(content.layer?.cornerRadius ?? -1)")
+                    if let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                        content.cacheDisplay(in: content.bounds, to: rep)
+                        let cornerAlpha = rep.colorAt(x: 0, y: 0)?.alphaComponent ?? 1
+                        let centreAlpha = rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?
+                            .alphaComponent ?? 0
+                        check("the rendered corner pixel is masked out",
+                              cornerAlpha < 0.05, detail: String(format: "alpha %.2f", cornerAlpha))
+                        check("the rendered centre pixel is fully opaque",
+                              centreAlpha > 0.95, detail: String(format: "alpha %.2f", centreAlpha))
+                    } else {
+                        check("the pin content view renders for the corner probe", false)
+                    }
+                }
                 weakPin = visible.first
             }
 

@@ -70,7 +70,12 @@ final class PinWindow: NSPanel {
         let content = PinContentView(frame: NSRect(origin: .zero, size: frame.size))
         content.owner = self
         content.wantsLayer = true
-        content.layer?.cornerRadius = 4
+        // The old 4 pt radius read as barely-not-square. One uniform 12 pt radius with Apple's
+        // continuous curvature gives every pin the same rounded look regardless of image size or
+        // zoom; tiny pins clamp so they cannot become capsules. Display-only: Copy and Save use
+        // the untouched bitmap.
+        content.layer?.cornerRadius = PinAppearance.effectiveCornerRadius(for: frame.size)
+        content.layer?.cornerCurve = .continuous
         content.layer?.masksToBounds = true
 
         imageView.image = NSImage(cgImage: image, size: imagePixelSize)
@@ -130,6 +135,13 @@ final class PinWindow: NSPanel {
         applyScale(proposed, anchor: anchor)
     }
 
+    /// Re-derive the (clamped) radius after any size change, so a pin zoomed far down still
+    /// rounds sensibly and everything else keeps the one shared radius.
+    private func refreshCornerRadius() {
+        contentView?.layer?.cornerRadius = PinAppearance.effectiveCornerRadius(for: frame.size)
+        invalidateShadow()
+    }
+
     func applyScale(_ scale: CGFloat, anchor: CGPoint? = nil) {
         let anchorPoint = anchor ?? CGPoint(x: frame.midX, y: frame.midY)
         let proposed = PinZoom.frame(
@@ -139,6 +151,7 @@ final class PinWindow: NSPanel {
             anchor: anchorPoint
         )
         setFrame(PinPlacement.clampReachable(proposed, within: visibleFrameForCurrentScreen()), display: true)
+        refreshCornerRadius()
     }
 
     func showAtOriginalSize() {
@@ -150,6 +163,7 @@ final class PinWindow: NSPanel {
         let scale = PinPlacement.fitScale(imageSize: imagePixelSize, in: visible)
         applyScale(scale)
         setFrame(PinPlacement.clampFullyOnScreen(frame, within: visible), display: true)
+        refreshCornerRadius()
     }
 
     func setPinOpacity(_ value: CGFloat) {

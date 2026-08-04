@@ -222,6 +222,33 @@ struct PinOpacityTests {
     }
 }
 
+@Suite("Pin appearance")
+struct PinAppearanceTests {
+
+    @Test("Every ordinary pin gets the one shared radius")
+    func uniformRadius() {
+        // The whole point of the change: 4 pt read as barely-not-square, and different-looking
+        // corners across pins would be worse than either. One number, everywhere.
+        #expect(PinAppearance.cornerRadius == 12)
+        for size in [CGSize(width: 400, height: 300), CGSize(width: 1200, height: 800),
+                     CGSize(width: 64, height: 64)] {
+            #expect(PinAppearance.effectiveCornerRadius(for: size) == 12)
+        }
+    }
+
+    @Test("A tiny pin clamps to half its short edge instead of becoming a capsule")
+    func tinyPinClamps() {
+        #expect(PinAppearance.effectiveCornerRadius(for: CGSize(width: 16, height: 100)) == 8)
+        #expect(PinAppearance.effectiveCornerRadius(for: CGSize(width: 100, height: 10)) == 5)
+    }
+
+    @Test("Degenerate sizes never yield a negative radius")
+    func degenerateSizes() {
+        #expect(PinAppearance.effectiveCornerRadius(for: .zero) == 0)
+        #expect(PinAppearance.effectiveCornerRadius(for: CGSize(width: -50, height: 40)) == 0)
+    }
+}
+
 @Suite("Pin focus order")
 struct PinFocusOrderTests {
 

@@ -471,6 +471,83 @@ struct LivePreEncoderTests {
     }
 }
 
+// MARK: - Diagnostics
+
+@Suite("Pre-encoder diagnostics")
+struct LivePreEncoderDiagnosticsTests {
+
+    let canvas = CGSize(width: 48, height: 32)
+
+    @Test("Nearest-rank percentile is exact on known inputs")
+    func percentileDefinition() {
+        // The release-plan gates (e.g. "30 fps needs p95 ≤ 26.7 ms") are defined against exactly
+        // this function, so its definition is pinned rather than assumed.
+        typealias D = LivePreEncoder.Diagnostics
+        #expect(D.percentile(50, of: []) == nil)
+        #expect(D.percentile(50, of: [7]) == 7)
+        #expect(D.percentile(50, of: [1, 2, 3, 4]) == 2)       // nearest-rank: ceil(0.5*4)=2nd
+        #expect(D.percentile(95, of: [1, 2, 3, 4]) == 4)       // ceil(0.95*4)=4th
+        #expect(D.percentile(95, of: Array(stride(from: 1.0, through: 100.0, by: 1))) == 95)
+        #expect(D.percentile(0, of: [3, 1, 2]) == 1)
+        #expect(D.percentile(100, of: [3, 1, 2]) == 3)
+    }
+
+    @Test("A clean run reports one duration per encoded frame and a sane peak")
+    func happyPathDiagnostics() throws {
+        let encoder = LivePreEncoder(canvasSize: canvas, options: AnimatedWebPOptions(), frameRate: 12)
+        for index in 0..<6 {
+            encoder.submit(
+                image: solid(width: 48, height: 32, level: Double(index) / 6),
+                captureTimestamp: Double(index) * 0.1
+            )
+        }
+        _ = try #require(encoder.finish(endTimestampMs: 600))
+
+        let diag = encoder.diagnostics
+        #expect(diag.submitted == 6)
+        #expect(diag.encoded == 6)
+        #expect(diag.encodeDurationsMs.count == 6, "one timing sample per encoded frame")
+        #expect(diag.encodeDurationsMs.allSatisfy { $0 >= 0 })
+        #expect(diag.p50EncodeMs != nil && diag.p95EncodeMs != nil)
+        #expect(diag.p50EncodeMs! <= diag.p95EncodeMs!)
+        #expect(diag.peakBacklog >= 1 && diag.peakBacklog <= diag.backlogLimit)
+        #expect(diag.abandonment == nil)
+    }
+
+    @Test("The peak backlog records how close the run came to giving up")
+    func peakBacklogIsBounded() {
+        let encoder = LivePreEncoder(
+            canvasSize: canvas, options: AnimatedWebPOptions(), frameRate: 12, maxBacklog: 4
+        )
+        for index in 0..<200 {
+            encoder.submit(image: solid(width: 48, height: 32, level: 0.5),
+                           captureTimestamp: Double(index) * 0.001)
+        }
+        let diag = encoder.diagnostics
+        #expect(diag.peakBacklog <= 4, "peak can never exceed the limit that triggers abandonment")
+        if diag.abandonment != nil {
+            #expect(diag.peakBacklog == 4, "an abandoned run must have actually hit the ceiling")
+        }
+        encoder.cancel()
+    }
+
+    @Test("Abandonment is visible in the same snapshot as the counters")
+    func abandonmentInDiagnostics() {
+        let encoder = LivePreEncoder(
+            canvasSize: canvas, options: AnimatedWebPOptions(), frameRate: 12, maxBacklog: 1
+        )
+        for index in 0..<50 {
+            encoder.submit(image: solid(width: 48, height: 32, level: 0.5),
+                           captureTimestamp: Double(index) * 0.0005)
+        }
+        _ = encoder.finish(endTimestampMs: 60_000)
+        let diag = encoder.diagnostics
+        if case .backlog = diag.abandonment {} else {
+            Issue.record("expected a backlog abandonment, got \(String(describing: diag.abandonment))")
+        }
+    }
+}
+
 // MARK: - Encode strategy
 
 @Suite("Animation encode strategy")

@@ -31,15 +31,28 @@ enum ExportBenchmark {
             ? URL(fileURLWithPath: arguments[index + 1], isDirectory: true)
             : FileManager.default.temporaryDirectory.appendingPathComponent("tricap-benchmark")
 
-        let frames = intArgument("--frames", in: arguments) ?? 181     // 12 fps × 15 s + 1
+        // Everything that shapes encoder cost is a parameter. An earlier version hard-coded
+        // 12 fps, which made it structurally unable to answer the question this tool exists
+        // for — whether pre-encoding keeps up at the frame rate being considered.
+        let fps = (intArgument("--fps", in: arguments) ?? 12).clamped(to: RecordingLimits.frameRateRange)
+        let seconds = intArgument("--seconds", in: arguments) ?? 15
+        let frames = intArgument("--frames", in: arguments) ?? (fps * seconds + 1)
         let runs = intArgument("--runs", in: arguments) ?? 3
         let width = intArgument("--width", in: arguments) ?? 1440
         let height = intArgument("--height", in: arguments) ?? 900
+        let options = AnimatedWebPOptions(
+            quality: intArgument("--quality", in: arguments) ?? AnimatedWebPOptions().quality,
+            method: intArgument("--method", in: arguments) ?? AnimatedWebPOptions().method
+        )
+        // The pre-79d20b3 "thorough" arm exists for historical comparison and costs minutes per
+        // run; matrix sweeps over fps/resolution skip it and compare against arm B instead.
+        let includeThorough = !arguments.contains("--no-thorough")
 
         Task { @MainActor in
             do {
                 try run(directory: directory, frameCount: frames, runs: runs,
-                        canvas: CGSize(width: width, height: height))
+                        canvas: CGSize(width: width, height: height),
+                        frameRate: fps, options: options, includeThorough: includeThorough)
                 exit(0)
             } catch {
                 FileHandle.standardError.write(Data("benchmark failed: \(error)\n".utf8))
@@ -231,9 +244,10 @@ enum ExportBenchmark {
         frameCount: Int,
         canvas: CGSize,
         options: AnimatedWebPOptions,
+        frameRate: Int = 12,
         strategy: AnimationEncodeStrategy = .default
     ) {
-        let interval = 1.0 / 12.0
+        let interval = 1.0 / Double(frameRate)
         var pngs: [Data] = []
         for index in 0..<frameCount {
             if let image = syntheticFrame(index: index, size: canvas),
@@ -269,24 +283,25 @@ enum ExportBenchmark {
         let assembleSeconds = elapsed(since: assembleStart)
 
         let n = Double(max(1, images.count))
-        print("  -- per-frame cost breakdown (\(images.count) frames at \(Int(canvas.width))×\(Int(canvas.height))) --")
+        print("  -- per-frame cost breakdown (\(images.count) frames at \(Int(canvas.width))×\(Int(canvas.height)), quality \(options.quality), method \(options.method)) --")
         print(String(format: "    PNG decode        %7.1f ms/frame   (%.2f s total)", decodeSeconds / n * 1000, decodeSeconds))
         print(String(format: "    RGBX extraction   %7.1f ms/frame   (%.2f s total)", rasterSeconds / n * 1000, rasterSeconds))
         print(String(format: "    WebPAnimEncoderAdd%7.1f ms/frame   (%.2f s total)  <- dominates",
                      addSeconds / n * 1000, addSeconds))
         print(String(format: "    assemble          %7.1f ms total    (%d KB)",
                      assembleSeconds * 1000, (data?.count ?? 0) / 1024))
-        print(String(format: "    capture interval  %7.1f ms/frame at 12 fps", interval * 1000))
+        print(String(format: "    capture interval  %7.1f ms/frame at %d fps", interval * 1000, frameRate))
         let realtimeRatio = (addSeconds / n) / interval
         print(String(format: "    encode is %.1f× the capture interval — pre-encoding %@ keep up",
                      realtimeRatio, realtimeRatio < 1 ? "CAN" : "CANNOT"))
         print("")
     }
 
-    private static func run(directory: URL, frameCount: Int, runs: Int, canvas: CGSize) throws {
+    private static func run(
+        directory: URL, frameCount: Int, runs: Int, canvas: CGSize,
+        frameRate: Int, options: AnimatedWebPOptions, includeThorough: Bool
+    ) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let options = AnimatedWebPOptions()
-        let frameRate = 12
 
         print("== Animated WebP export benchmark")
         print("  canvas \(Int(canvas.width))×\(Int(canvas.height)) · \(frameRate) fps · \(frameCount) frames"
@@ -295,10 +310,16 @@ enum ExportBenchmark {
         print("  recording is paced at the real \(String(format: "%.1f", 1000.0 / Double(frameRate))) ms frame interval")
         print("  runs: \(runs) (median reported)\n")
 
-        for (name, strategy) in [("thorough (shipped through 79d20b3)", AnimationEncodeStrategy.thorough),
-                                 ("balanced (minimize_size=0, allow_mixed=0)", AnimationEncodeStrategy.balanced)] {
+        var profiles: [(String, AnimationEncodeStrategy)] = [
+            ("balanced (minimize_size=0, allow_mixed=0)", .balanced)
+        ]
+        if includeThorough {
+            profiles.insert(("thorough (shipped through 79d20b3)", .thorough), at: 0)
+        }
+        for (name, strategy) in profiles {
             print("  strategy: \(name)")
-            profile(frameCount: min(frameCount, 24), canvas: canvas, options: options, strategy: strategy)
+            profile(frameCount: min(frameCount, 24), canvas: canvas, options: options,
+                    frameRate: frameRate, strategy: strategy)
         }
 
         // Build the material once. Generation is not part of any measurement.
@@ -332,7 +353,7 @@ enum ExportBenchmark {
         var preEncodeStatus = "—"
 
         for run in 1...runs {
-            for arm in Arm.allCases {
+            for arm in Arm.allCases where includeThorough || arm != .baseline {
                 autoreleasepool {
                     let preEncoder = arm.usesPreEncoder
                         ? LivePreEncoder(canvasSize: canvas, options: options,
@@ -350,10 +371,16 @@ enum ExportBenchmark {
                     let artifact = preEncoder?.finish(
                         endTimestampMs: Int((Double(pngs.count) / Double(frameRate) * 1000).rounded())
                     )
-                    if arm.usesPreEncoder {
-                        preEncodeStatus = artifact == nil
-                            ? "unavailable (\(preEncoder?.abandonedBecause?.reason ?? "unknown"))"
-                            : "available, \(artifact!.frameCount) frames"
+                    if arm.usesPreEncoder, let preEncoder {
+                        let diag = preEncoder.diagnostics
+                        let p50 = diag.p50EncodeMs.map { String(format: "%.1f", $0) } ?? "—"
+                        let p95 = diag.p95EncodeMs.map { String(format: "%.1f", $0) } ?? "—"
+                        preEncodeStatus = (artifact == nil
+                            ? "unavailable (\(diag.abandonment?.reason ?? "unknown"))"
+                            : "available, \(artifact!.frameCount) frames")
+                            + " · encode p50 \(p50) ms / p95 \(p95) ms"
+                            + " · peak backlog \(diag.peakBacklog)/\(diag.backlogLimit)"
+                            + " · retained \(recording.clip.retainedBytes / 1_048_576) MB PNG"
                     }
                     if let result = try? exportFully(
                         clip: recording.clip, options: options, directory: directory,
@@ -369,7 +396,7 @@ enum ExportBenchmark {
         }
 
         print("\n  -- tail latency: Export click → written and verified --")
-        let baselineMedian = median(tails[.baseline] ?? [])
+        let baselineMedian = median(tails[.baseline] ?? tails[.fasterStrategy] ?? [])
         for arm in Arm.allCases {
             let values = tails[arm] ?? []
             let m = median(values)

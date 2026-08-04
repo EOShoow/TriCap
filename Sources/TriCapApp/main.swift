@@ -17,6 +17,12 @@ if ExportBenchmark.runIfRequested(arguments: CommandLine.arguments) {
     application.run()
 }
 
+// `--benchmark-recording <dir>` records the real screen through the full production path and
+// reports the metrics the release-plan gates are defined against. See RecordingBenchmark.
+if RecordingBenchmark.runIfRequested(arguments: CommandLine.arguments) {
+    application.run()
+}
+
 // `--selftest <dir>` drives the whole capture→annotate→export pipeline and exits non-zero on
 // any failed check. See CaptureSelfTest.
 _ = CaptureSelfTest.runIfRequested(arguments: CommandLine.arguments)

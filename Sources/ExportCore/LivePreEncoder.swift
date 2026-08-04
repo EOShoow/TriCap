@@ -66,6 +66,10 @@ public final class LivePreEncoder: @unchecked Sendable {
     private var submitted = 0
     private var encoded = 0
     private var abandonment: Abandonment?
+    private var peakPending = 0
+    /// Wall-clock cost of every `WebPAnimEncoderAdd`, for the benchmark's p50/p95. Bounded by the
+    /// recording's own frame ceiling (30 fps × 30 s max), so no cap is needed.
+    private var encodeDurationsMs: [Double] = []
     /// The shared timeline rule, so the timestamps here are exactly the ones `ClipTiming` will
     /// compute for the same frames at export time.
     private var timeline = IncrementalTimeline()
@@ -129,6 +133,46 @@ public final class LivePreEncoder: @unchecked Sendable {
         return submitted
     }
 
+    /// Everything the benchmarks need to judge whether pre-encoding kept up.
+    ///
+    /// Read at any time; a consistent snapshot is taken under the same lock the counters use.
+    public struct Diagnostics: Sendable {
+        public let submitted: Int
+        public let encoded: Int
+        /// The largest number of frames that were ever waiting at once. Compared against
+        /// `maxBacklog` this is the honest "how close did we come to giving up" number.
+        public let peakBacklog: Int
+        public let backlogLimit: Int
+        public let abandonment: Abandonment?
+        /// Wall-clock milliseconds spent inside `WebPAnimEncoderAdd`, one entry per frame.
+        public let encodeDurationsMs: [Double]
+
+        public var p50EncodeMs: Double? { Self.percentile(50, of: encodeDurationsMs) }
+        public var p95EncodeMs: Double? { Self.percentile(95, of: encodeDurationsMs) }
+
+        /// Nearest-rank percentile. Pure and pinned by tests: the gate thresholds in the release
+        /// plan are expressed against exactly this definition.
+        public static func percentile(_ p: Double, of values: [Double]) -> Double? {
+            guard !values.isEmpty else { return nil }
+            let sorted = values.sorted()
+            let clamped = min(max(p, 0), 100)
+            let rank = Int((clamped / 100 * Double(sorted.count)).rounded(.up))
+            return sorted[max(0, min(sorted.count - 1, rank - 1))]
+        }
+    }
+
+    public var diagnostics: Diagnostics {
+        lock.lock(); defer { lock.unlock() }
+        return Diagnostics(
+            submitted: submitted,
+            encoded: encoded,
+            peakBacklog: peakPending,
+            backlogLimit: maxBacklog,
+            abandonment: abandonment,
+            encodeDurationsMs: encodeDurationsMs
+        )
+    }
+
     // MARK: - Feeding
 
     /// Hand one frame to the pre-encoder. Returns immediately; never encodes on the caller's
@@ -153,6 +197,7 @@ public final class LivePreEncoder: @unchecked Sendable {
         }
         pending += 1
         submitted += 1
+        if pending > peakPending { peakPending = pending }
         let timestampMs = timeline.append(captureTimestamp: captureTimestamp)
         lock.unlock()
 
@@ -173,10 +218,15 @@ public final class LivePreEncoder: @unchecked Sendable {
             return
         }
 
+        let encodeStart = ContinuousClock.now
         let ok = session.add(image: image, timestampMs: timestampMs)
+        let elapsed = ContinuousClock.now - encodeStart
+        let elapsedMs = Double(elapsed.components.seconds) * 1000
+            + Double(elapsed.components.attoseconds) / 1e15
 
         lock.lock()
         pending -= 1
+        encodeDurationsMs.append(elapsedMs)
         if ok {
             encoded += 1
         } else if abandonment == nil {

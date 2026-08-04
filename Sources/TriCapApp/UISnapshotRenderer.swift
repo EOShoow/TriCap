@@ -43,9 +43,22 @@ enum UISnapshotRenderer {
 
         let store = SettingsStore(defaults: snapshotDefaults())
 
+        // Login-item state is injected, not read from the real SMAppService: this process is a
+        // bare SwiftPM binary whose live status would be .notFound and vary by machine.
         try write(
-            hosting(SettingsView(store: store), size: CGSize(width: 540, height: 700)),
+            hosting(
+                SettingsView(store: store, loginItem: LoginItemController(service: FakeLoginItemService(fixed: .notRegistered))),
+                size: CGSize(width: 540, height: 780)
+            ),
             to: directory.appendingPathComponent("01-settings-general.png")
+        )
+        // The requiresApproval state: toggle on, warning line, System Settings entry point.
+        try write(
+            hosting(
+                SettingsView(store: store, loginItem: LoginItemController(service: FakeLoginItemService(fixed: .requiresApproval))),
+                size: CGSize(width: 540, height: 780)
+            ),
+            to: directory.appendingPathComponent("19-settings-login-approval.png")
         )
 
         // The quality tab with its advanced section open, which is the whole point of the
@@ -710,4 +723,14 @@ enum UISnapshotRenderer {
             sourceRectInDisplayPoints: CGRect(x: 100, y: 100, width: CGFloat(pixelWidth) / 2, height: CGFloat(pixelHeight) / 2)
         )
     }
+}
+
+/// A canned login-item backend for deterministic settings snapshots.
+@MainActor
+private struct FakeLoginItemService: LoginItemService {
+    let fixed: LoginItemStatus
+    var status: LoginItemStatus { fixed }
+    func register() throws {}
+    func unregister() throws {}
+    func openSystemSettings() {}
 }

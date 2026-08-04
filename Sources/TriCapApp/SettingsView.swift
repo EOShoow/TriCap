@@ -12,6 +12,7 @@ import TriCapKit
 /// parameters behind it for the people who do.
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
+    @ObservedObject var loginItem: LoginItemController
     @State private var hotKeyError: String?
     @State private var pinHotKeyError: String?
     @State private var showAdvancedQuality: Bool
@@ -21,10 +22,12 @@ struct SettingsView: View {
 
     init(
         store: SettingsStore,
+        loginItem: LoginItemController = LoginItemController(),
         onShowWelcome: (() -> Void)? = nil,
         initiallyExpandAdvancedQuality: Bool = false
     ) {
         self.store = store
+        self.loginItem = loginItem
         self.onShowWelcome = onShowWelcome
         _showAdvancedQuality = State(initialValue: initiallyExpandAdvancedQuality)
     }
@@ -37,9 +40,9 @@ struct SettingsView: View {
             aboutTab.tabItem { Label("About", systemImage: "info.circle") }
         }
         // Tall enough that the General tab — two shortcuts, the post-screenshot action, the
-        // countdown and the permission row — fits without scrolling. The Form still scrolls if a
-        // longer explanation wraps, but nothing important should need hunting for.
-        .frame(width: 540, height: 700)
+        // countdown, launch-at-login and the permission row — fits without scrolling. The Form
+        // still scrolls if a longer explanation wraps, but nothing important should need hunting.
+        .frame(width: 540, height: 780)
     }
 
     // MARK: - General
@@ -112,6 +115,12 @@ struct SettingsView: View {
             }
 
             Section {
+                loginItemRow
+            } header: {
+                Text("Startup")
+            }
+
+            Section {
                 permissionRow
             } header: {
                 Text("Screen recording permission")
@@ -119,6 +128,45 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 8)
+        .onAppear { loginItem.refresh() }
+    }
+
+    /// Launch at login, driven entirely by `SMAppService.mainApp.status` — the system's answer is
+    /// re-read on every appearance and after every toggle, never cached in AppSettings.
+    private var loginItemRow: some View {
+        let presentation = loginItem.presentation
+        return VStack(alignment: .leading, spacing: 8) {
+            Toggle(
+                "Open TriCap at login",
+                isOn: Binding(
+                    get: { presentation.toggleIsOn },
+                    set: { loginItem.setEnabled($0) }
+                )
+            )
+            .accessibilityLabel("Open TriCap at login")
+            .accessibilityHint("Adds or removes TriCap in System Settings Login Items. Off by default.")
+
+            if let statusText = presentation.statusText {
+                HStack(alignment: .top) {
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(presentation.isWarning ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if presentation.offersSystemSettings {
+                        Spacer()
+                        Button("Open Login Items Settings…") { loginItem.openSystemSettings() }
+                            .font(.caption)
+                    }
+                }
+            }
+            if let error = loginItem.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Login item error: \(error)")
+            }
+        }
     }
 
     private var permissionRow: some View {

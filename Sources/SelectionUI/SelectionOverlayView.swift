@@ -64,16 +64,22 @@ public final class SelectionOverlayView: NSView {
         context.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
         context.fill(bounds)
 
-        // The mode banner stays up for the whole drag. Previously the only cue that a drag was
-        // going to start a *recording* rather than take a screenshot was the border colour, and
-        // the explanatory line vanished the moment the mouse went down.
-        drawModeBanner(in: context)
-
-        guard let selection = globalSelection else {
+        if let selection = globalSelection {
+            drawSelection(selection, in: context)
+        } else {
             drawWindowHighlight(in: context)
-            return
         }
 
+        // The mode banner is drawn LAST, deliberately. The selection punch-out and the window
+        // highlight both use `.copy` blending, which *replaces* pixels — so a banner drawn first
+        // was erased by any selection or highlighted window that overlapped it, and a full-screen
+        // window hover blanked it entirely. Draw order is the fix; the banner must never move to
+        // its own higher-level window, and it never reaches the capture because the overlay
+        // windows are excluded from the capture filter and are gone before a still is taken.
+        drawModeBanner(in: context)
+    }
+
+    private func drawSelection(_ selection: CGRect, in context: CGContext) {
         let local = convertFromGlobal(selection)
         let visible = local.intersection(bounds)
         guard !visible.isNull, visible.width > 0, visible.height > 0 else { return }

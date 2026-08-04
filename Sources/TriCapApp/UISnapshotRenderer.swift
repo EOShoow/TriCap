@@ -147,6 +147,17 @@ enum UISnapshotRenderer {
             windowHighlightSnapshot(),
             to: directory.appendingPathComponent("14-selection-window-highlight.png")
         )
+        // The two overlaps that used to erase the mode banner: a full-screen window highlight and
+        // a manual selection dragged straight through the banner. Both `.copy`-blend over it; the
+        // banner must be repainted on top.
+        try write(
+            bannerOverlapSnapshot(kind: .fullScreenHighlight),
+            to: directory.appendingPathComponent("16-banner-over-window-highlight.png")
+        )
+        try write(
+            bannerOverlapSnapshot(kind: .selectionThroughBanner),
+            to: directory.appendingPathComponent("17-banner-over-selection.png")
+        )
         // Where the chrome lands for a near-full-screen recording — the case that used to put the
         // Stop button off the top of the display.
         try write(
@@ -187,6 +198,41 @@ enum UISnapshotRenderer {
     }
 
     /// The overlay with a window highlighted under the pointer and no drag in progress.
+    /// The overlap regressions: content drawn with `.copy` blending crossing the mode banner.
+    private enum BannerOverlap {
+        case fullScreenHighlight
+        case selectionThroughBanner
+    }
+
+    private static func bannerOverlapSnapshot(kind: BannerOverlap) throws -> NSBitmapImageRep {
+        let size = CGSize(width: 900, height: 560)
+        let container = offscreenContainer(size: size)
+        let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
+
+        let overlay = SelectionOverlayView(frame: container.bounds)
+        container.addSubview(overlay)
+
+        let windowOrigin = container.window?.frame.origin ?? .zero
+        switch kind {
+        case .fullScreenHighlight:
+            // Hovering a full-screen window: the highlight's `.copy` fill covers the entire view,
+            // banner region included.
+            overlay.highlightedWindow = CGRect(origin: windowOrigin, size: size)
+            overlay.highlightedWindowPixelSize = CGSize(width: 1800, height: 1120)
+        case .selectionThroughBanner:
+            // A drag that crosses the banner: the punch-out clears everything it covers.
+            overlay.isRecordingMode = true
+            overlay.globalSelection = CGRect(
+                x: windowOrigin.x + 180, y: windowOrigin.y + size.height - 220,
+                width: 540, height: 220
+            )
+            overlay.selectionPixelSize = CGSize(width: 1080, height: 440)
+        }
+
+        settle(container)
+        return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
+    }
+
     private static func windowHighlightSnapshot() throws -> NSBitmapImageRep {
         let size = CGSize(width: 900, height: 560)
         let container = offscreenContainer(size: size)

@@ -147,6 +147,39 @@ public enum ClipTiming {
     }
 }
 
+/// Preview playback for the editor: the player plays **exactly what the export would produce**
+/// for the current trim — same frame durations, same holds, same loop-forever behaviour as the
+/// animated WebP itself. Anything else would be a lie the user only discovers after exporting.
+public enum ClipPlayback {
+
+    /// The timeline the player steps through, identical to the one `EditorModel.export()` builds:
+    /// trimmed frames re-based to zero, grid-smoothed, with the real trimmed duration deciding the
+    /// final frame's hold.
+    public static func timeline(clip: RecordedClip, trimStart: Int, trimEnd: Int) -> FrameTimeline? {
+        guard let range = ClipTrimmer.normalizedRange(
+            first: trimStart, last: trimEnd, count: clip.frames.count
+        ) else { return nil }
+        let frames = ClipTrimmer.trim(frames: clip.frames, to: range)
+        let duration = ClipTrimmer.trimmedDuration(
+            frames: clip.frames, range: range, clipDuration: clip.duration
+        )
+        return ClipTiming.timeline(
+            for: frames,
+            nominalFrameInterval: clip.nominalFrameInterval,
+            totalDuration: duration
+        )
+    }
+
+    /// `m:ss.t` — enough resolution to see a hold ticking by, compact enough for a toolbar.
+    public static func timeString(ms: Int) -> String {
+        let clamped = max(0, ms)
+        let tenths = (clamped % 1000) / 100
+        let seconds = (clamped / 1000) % 60
+        let minutes = clamped / 60_000
+        return String(format: "%d:%02d.%d", minutes, seconds, tenths)
+    }
+}
+
 /// Slider ranges for the editor's trim handles and preview scrubber.
 ///
 /// Pure so the one-frame case is pinned by a test rather than by eyeballing the window. A clip

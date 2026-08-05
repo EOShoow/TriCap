@@ -386,3 +386,76 @@ enum TestFixtures {
         )
     }
 }
+
+@Suite("Clip preview playback")
+struct ClipPlaybackTests {
+
+    /// A 12 fps clip with a 2 s hold in the middle and a 1 s static tail.
+    private func clip() -> RecordedClip {
+        let stamps: [TimeInterval] = [0, 0.083, 0.166, 2.166, 2.249]
+        let frames = stamps.map { RecordedFrame(pngData: Data([0]), timestamp: $0) }
+        return RecordedClip(
+            frames: frames,
+            pixelSize: CGSize(width: 10, height: 10),
+            region: TestFixtures.region,
+            nominalFrameInterval: 1.0 / 12.0,
+            stopReason: .userStopped,
+            droppedFrameCount: 0,
+            colorSpace: nil,
+            retainedBytes: 5,
+            wallClockDuration: 3.25
+        )
+    }
+
+    @Test("The player's timeline is exactly the export's timeline for the same trim")
+    func playerMatchesExport() throws {
+        // This is the whole contract: what you watch is what you ship. Holds included.
+        let c = clip()
+        let playback = try #require(ClipPlayback.timeline(clip: c, trimStart: 0, trimEnd: 4))
+
+        let range = try #require(ClipTrimmer.normalizedRange(first: 0, last: 4, count: 5))
+        let exported = try #require(ClipTiming.timeline(
+            for: ClipTrimmer.trim(frames: c.frames, to: range),
+            nominalFrameInterval: c.nominalFrameInterval,
+            totalDuration: ClipTrimmer.trimmedDuration(frames: c.frames, range: range, clipDuration: c.duration)
+        ))
+        #expect(playback == exported)
+        // The 2 s mid-clip hold is in the durations the player will sleep through.
+        #expect(playback.durationsMs.contains { $0 >= 1_900 })
+        // And the static tail holds the last frame until the recording's real end.
+        #expect(playback.endTimestampMs >= 3_200)
+    }
+
+    @Test("Trimming changes the played timeline the same way it changes the export")
+    func trimmedPlayback() throws {
+        let c = clip()
+        let playback = try #require(ClipPlayback.timeline(clip: c, trimStart: 1, trimEnd: 3))
+        #expect(playback.frameCount == 3)
+        #expect(playback.timestampsMs.first == 0, "re-based to zero like the export")
+        // Trimmed tail: the last kept frame holds until the first dropped frame would have
+        // replaced it (frame 4 at 2.249 s), not until the recording's end.
+        #expect(playback.endTimestampMs == 2249 - 83)
+    }
+
+    @Test("Degenerate inputs produce no timeline rather than a crash", arguments: [
+        (0, -1), (99, 120),
+    ])
+    func degenerateTrims(start: Int, end: Int) {
+        // Out-of-range indices normalise; an empty clip yields nil.
+        let empty = RecordedClip(
+            frames: [], pixelSize: .zero, region: TestFixtures.region,
+            nominalFrameInterval: 1.0 / 12.0, stopReason: .userStopped,
+            droppedFrameCount: 0, colorSpace: nil, retainedBytes: 0, wallClockDuration: 0
+        )
+        #expect(ClipPlayback.timeline(clip: empty, trimStart: start, trimEnd: end) == nil)
+        #expect(ClipPlayback.timeline(clip: clip(), trimStart: start, trimEnd: end) != nil)
+    }
+
+    @Test("The time readout formats like a player", arguments: [
+        (0, "0:00.0"), (100, "0:00.1"), (3_400, "0:03.4"), (9_940, "0:09.9"),
+        (59_999, "0:59.9"), (60_000, "1:00.0"), (125_500, "2:05.5"), (-5, "0:00.0"),
+    ])
+    func timeFormatting(ms: Int, expected: String) {
+        #expect(ClipPlayback.timeString(ms: ms) == expected)
+    }
+}

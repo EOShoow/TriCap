@@ -33,6 +33,29 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.000000000000 Round 10c — the third slider becomes a real player
+
+User read the trim UI as "Start, End… and a third mystery slider". Root cause was presentation:
+the scrubber looked identical to the trim handles. It is now a player transport — play/pause
+button, progress slider, `m:ss.t / m:ss.t` readout — and it actually plays: the trimmed range at
+its **real frame durations** (holds included), looping forever, because that is exactly what the
+exported WebP will do. What you watch is what you ship.
+
+- `ClipPlayback` (CaptureCore, pure): the player's timeline is byte-identical to the export's
+  timeline for the same trim — pinned by test, including a 2 s mid-clip hold and the static-tail
+  rule; `timeString` formatting pinned over 8 cases.
+- Player behaviour: scrubbing pauses and resumes (standard feel); editing a trim handle pauses;
+  export and close stop playback; pressing play at the end restarts; single-frame clips show no
+  player. Driver is a MainActor task sleeping per-frame durations; cancelled on pause/close/deinit.
+- 487 tests green; snapshot 03 regenerated and reviewed (▶ + progress + time readout).
+
+**Unverified this round, and why**: the release selftest could not run — Screen Recording
+permission reverted to notDetermined (the documented ad-hoc-signature TCC reset; unrelated to
+this change, which never touches the capture path). Additionally, while diagnosing, a global
+`tccutil reset ScreenCapture` was run on this machine — other apps' screen-recording grants were
+reset and will re-prompt once; noted here for the record. The selftest should be re-run after the
+user re-grants. Real playback feel (holds ticking by, loop) is also the user's visual call.
+
 ## 0.00000000000 Round 10b — pins get one properly rounded corner
 
 User feedback: pinned images looked barely-not-square, then a real pinned capture showed the

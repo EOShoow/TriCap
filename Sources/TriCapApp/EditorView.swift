@@ -194,6 +194,7 @@ struct EditorView: View {
                     value: Binding(
                         get: { Double(model.trimStart) },
                         set: { newValue in
+                            model.pauseForTrimEdit()
                             model.trimStart = min(Int(newValue.rounded()), model.trimEnd)
                             model.previewIndex = model.trimStart
                         }
@@ -209,6 +210,7 @@ struct EditorView: View {
                     value: Binding(
                         get: { Double(model.trimEnd) },
                         set: { newValue in
+                            model.pauseForTrimEdit()
                             model.trimEnd = max(Int(newValue.rounded()), model.trimStart)
                             model.previewIndex = model.trimEnd
                         }
@@ -218,16 +220,29 @@ struct EditorView: View {
                 Text("\(model.trimEnd)").font(.caption.monospacedDigit()).frame(width: 34)
             }
 
+            // The preview player. Start/End decide what is exported; this row only decides what
+            // you are looking at — and plays the trimmed range at its real frame durations,
+            // looping forever, exactly like the exported WebP will.
             HStack(spacing: 10) {
-                Text("Frame").font(.caption).foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
+                Button(action: { model.togglePlayback() }) {
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        .frame(width: 22)
+                }
+                .buttonStyle(.borderless)
+                .help(model.isPlaying ? "Pause the preview" : "Play the trimmed clip as it will export")
+                .accessibilityLabel(model.isPlaying ? "Pause preview" : "Play preview")
                 Slider(
                     value: Binding(
                         get: { Double(model.previewIndex) },
                         set: { model.previewIndex = Int($0.rounded()).clamped(to: model.trimStart...model.trimEnd) }
                     ),
-                    in: model.previewScrubRange
+                    in: model.previewScrubRange,
+                    onEditingChanged: { model.scrubbingChanged($0) }
                 )
-                Text("\(model.previewIndex)").font(.caption.monospacedDigit()).frame(width: 34)
+                Text(model.playbackTimeLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 96, alignment: .trailing)
             }
             }
         }

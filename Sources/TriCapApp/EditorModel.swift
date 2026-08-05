@@ -37,6 +37,10 @@ public final class EditorModel: ObservableObject {
     @Published public var trimEnd = 0
     /// Which frame the canvas is currently showing.
     @Published public var previewIndex = 0
+    /// Whether the preview player is running. Driven only by ``play()``/``pause()``.
+    @Published public private(set) var isPlaying = false
+    private var playbackTask: Task<Void, Never>?
+    private var wasPlayingBeforeScrub = false
 
     @Published public var isExporting = false
     @Published public var exportProgress: Double = 0
@@ -185,6 +189,76 @@ public final class EditorModel: ObservableObject {
         }
     }
 
+    // MARK: - Preview playback
+
+    /// The timeline the player steps through — exactly the export's timeline for the current
+    /// trim, holds included. Cheap to rebuild (a few hundred integers), so no caching.
+    public func playbackTimeline() -> FrameTimeline? {
+        guard case .clip(let clip) = source else { return nil }
+        return ClipPlayback.timeline(clip: clip, trimStart: trimStart, trimEnd: trimEnd)
+    }
+
+    /// `current / total` for the player readout, from the same timeline the export uses.
+    public var playbackTimeLabel: String {
+        guard let timeline = playbackTimeline() else { return "" }
+        let rel = (previewIndex - trimStart).clamped(to: 0...(max(0, timeline.frameCount - 1)))
+        let current = timeline.timestampsMs.indices.contains(rel) ? timeline.timestampsMs[rel] : 0
+        return "\(ClipPlayback.timeString(ms: current)) / \(ClipPlayback.timeString(ms: timeline.endTimestampMs))"
+    }
+
+    public func togglePlayback() {
+        isPlaying ? pause() : play()
+    }
+
+    /// Play the trimmed range at its real frame durations, looping forever — the exported WebP
+    /// loops forever, and the preview must not pretend otherwise.
+    public func play() {
+        guard frameCount > 1 else { return }
+        if previewIndex >= trimEnd || previewIndex < trimStart {
+            previewIndex = trimStart   // pressing play at the end starts over, like every player
+        }
+        isPlaying = true
+        playbackTask?.cancel()
+        playbackTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.isPlaying, let timeline = self.playbackTimeline() else { return }
+                let rel = (self.previewIndex - self.trimStart)
+                    .clamped(to: 0...(max(0, timeline.durationsMs.count - 1)))
+                let holdMs = timeline.durationsMs.indices.contains(rel) ? timeline.durationsMs[rel] : 100
+                try? await Task.sleep(nanoseconds: UInt64(max(1, holdMs)) * 1_000_000)
+                guard !Task.isCancelled, self.isPlaying else { return }
+                if self.previewIndex >= self.trimEnd {
+                    self.previewIndex = self.trimStart
+                } else {
+                    self.previewIndex += 1
+                }
+            }
+        }
+    }
+
+    public func pause() {
+        isPlaying = false
+        playbackTask?.cancel()
+        playbackTask = nil
+    }
+
+    /// The scrubber pauses while dragging and resumes if it was playing — standard player feel.
+    public func scrubbingChanged(_ isScrubbing: Bool) {
+        if isScrubbing {
+            wasPlayingBeforeScrub = isPlaying
+            pause()
+        } else if wasPlayingBeforeScrub {
+            wasPlayingBeforeScrub = false
+            play()
+        }
+    }
+
+    /// Editing the trim while playing would make the loop chase moving goalposts; pause instead.
+    public func pauseForTrimEdit() {
+        wasPlayingBeforeScrub = false
+        pause()
+    }
+
     /// Keep the preview inside the trim handles as the user drags them.
     public func clampPreviewToTrim() {
         if previewIndex < trimStart { previewIndex = trimStart }
@@ -204,6 +278,7 @@ public final class EditorModel: ObservableObject {
     // MARK: - Export
 
     public func export() {
+        pause()
         guard !isExporting else { return }
         isExporting = true
         exportProgress = 0
@@ -318,5 +393,12 @@ public final class EditorModel: ObservableObject {
         }
     }
 
-    public func close() { onClosed() }
+    public func close() {
+        pause()
+        onClosed()
+    }
+
+    deinit {
+        playbackTask?.cancel()
+    }
 }

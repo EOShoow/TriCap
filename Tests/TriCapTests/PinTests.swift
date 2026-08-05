@@ -227,12 +227,12 @@ struct PinAppearanceTests {
 
     @Test("Every ordinary pin gets the one shared radius")
     func uniformRadius() {
-        // The whole point of the change: 4 pt read as barely-not-square, and different-looking
-        // corners across pins would be worse than either. One number, everywhere.
-        #expect(PinAppearance.cornerRadius == 12)
+        // The pin mask deliberately exceeds a typical macOS window corner (~12 pt), so a captured
+        // window's own rounded border cannot bleed through along the outer edge of the pin.
+        #expect(PinAppearance.cornerRadius == 24)
         for size in [CGSize(width: 400, height: 300), CGSize(width: 1200, height: 800),
                      CGSize(width: 64, height: 64)] {
-            #expect(PinAppearance.effectiveCornerRadius(for: size) == 12)
+            #expect(PinAppearance.effectiveCornerRadius(for: size) == 24)
         }
     }
 

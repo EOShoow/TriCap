@@ -199,7 +199,10 @@ public enum PinOpacity {
 public enum PinAppearance {
     /// One radius for every pin, in points — display-only. Copy and Save always hand back the
     /// original pixels; the rounding lives on the window's layer, never in the bitmap.
-    public static let cornerRadius: CGFloat = 12
+    // Deliberately larger than the roughly 12 pt corner used by ordinary macOS windows. A pin
+    // often contains a captured window whose own border is already rounded; the extra inset masks
+    // that source corner completely instead of letting its border bleed along the pin's edge.
+    public static let cornerRadius: CGFloat = 24
 
     /// The radius actually applied: uniform, but never so large that a tiny pin turns into a
     /// capsule — capped at half the short edge, and never negative.

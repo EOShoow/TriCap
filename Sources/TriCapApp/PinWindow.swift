@@ -70,9 +70,10 @@ final class PinWindow: NSPanel {
         let content = PinContentView(frame: NSRect(origin: .zero, size: frame.size))
         content.owner = self
         content.wantsLayer = true
-        // The old 4 pt radius read as barely-not-square. One uniform 12 pt radius with Apple's
-        // continuous curvature gives every pin the same rounded look regardless of image size or
-        // zoom; tiny pins clamp so they cannot become capsules. Display-only: Copy and Save use
+        // The old 4 pt radius read as barely-not-square. The shared radius is deliberately larger
+        // than an ordinary macOS window corner, so a captured window's own rounded border cannot
+        // bleed through at the pin edge. Apple's continuous curvature keeps the four corners
+        // uniform; tiny pins clamp so they cannot become capsules. Display-only: Copy and Save use
         // the untouched bitmap.
         content.layer?.cornerRadius = PinAppearance.effectiveCornerRadius(for: frame.size)
         content.layer?.cornerCurve = .continuous

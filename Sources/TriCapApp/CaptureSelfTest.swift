@@ -1253,7 +1253,7 @@ enum CaptureSelfTest {
                       })
 
                 // Rounded corners, proven on the rendered pixels rather than trusting the layer
-                // property: the very corner must be punched transparent, the centre opaque.
+                // property: all four corners must be punched transparent, the centre opaque.
                 if let pin = visible.first, let content = pin.contentView {
                     check("the pin's layer carries the shared corner radius",
                           content.layer?.cornerRadius
@@ -1261,11 +1261,22 @@ enum CaptureSelfTest {
                           detail: "radius=\(content.layer?.cornerRadius ?? -1)")
                     if let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
                         content.cacheDisplay(in: content.bounds, to: rep)
-                        let cornerAlpha = rep.colorAt(x: 0, y: 0)?.alphaComponent ?? 1
+                        let cornerPixels = [
+                            (name: "bottom-left", x: 0, y: 0),
+                            (name: "bottom-right", x: rep.pixelsWide - 1, y: 0),
+                            (name: "top-left", x: 0, y: rep.pixelsHigh - 1),
+                            (name: "top-right", x: rep.pixelsWide - 1, y: rep.pixelsHigh - 1),
+                        ]
+                        let cornerAlphas = cornerPixels.map { corner in
+                            (corner.name, rep.colorAt(x: corner.x, y: corner.y)?.alphaComponent ?? 1)
+                        }
                         let centreAlpha = rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?
                             .alphaComponent ?? 0
-                        check("the rendered corner pixel is masked out",
-                              cornerAlpha < 0.05, detail: String(format: "alpha %.2f", cornerAlpha))
+                        check("all four rendered corner pixels are masked out",
+                              cornerAlphas.allSatisfy { $0.1 < 0.05 },
+                              detail: cornerAlphas.map {
+                                  "\($0.0)=\(String(format: "%.2f", $0.1))"
+                              }.joined(separator: ", "))
                         check("the rendered centre pixel is fully opaque",
                               centreAlpha > 0.95, detail: String(format: "alpha %.2f", centreAlpha))
                     } else {

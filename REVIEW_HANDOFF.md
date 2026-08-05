@@ -35,16 +35,20 @@ The working tree is left exactly as verified below.
 
 ## 0.00000000000 Round 10b — pins get one properly rounded corner
 
-User feedback: pinned images looked barely-not-square. The old radius was 4 pt with the default
-corner curve. Now every pin shares **12 pt with continuous curvature** (`PinAppearance` in
-TriCapKit), clamped to half the short edge so a tiny pin cannot become a capsule, and re-derived
-after zoom/fit-to-screen so the radius stays constant in points at any scale. Display-only: Copy
-and Save still hand back the untouched bitmap.
+User feedback: pinned images looked barely-not-square, then a real pinned capture showed the
+captured window's own rounded border bleeding along the outer corner. The old radius was 4 pt with
+the default corner curve; the first fix used 12 pt, which merely matched a typical macOS window.
+Every pin now shares **24 pt with continuous curvature** (`PinAppearance` in TriCapKit), deliberately
+larger than the source window corner so the source edge is clipped away. It is clamped to half the
+short edge so a tiny pin cannot become a capsule, and re-derived after zoom/fit-to-screen so the
+radius stays constant in points at any scale. Display-only: Copy and Save still hand back the
+untouched bitmap.
 
 Evidence: 3 pure-rule tests (uniformity, tiny-pin clamp, degenerate sizes); the selftest now
-proves it on **rendered pixels** of a real pin window — corner alpha 0.00, centre alpha 1.00,
-layer radius 12 (139 selftest checks all pass). 483 tests green. Unverified: the subjective look
-at various zoom levels is the user's call; the corner mask under a live drag was not eyeballed.
+proves it on **rendered pixels** of a real pin window — all four corner alpha values < 0.05, centre
+alpha > 0.95, layer radius 24. The user's 2286×1502 flattened PNG had a roughly 24 px captured
+window corner, supporting the need for a larger display mask. Unverified: the subjective look at
+various zoom levels is the user's call; the corner mask under a live drag was not eyeballed.
 
 ## 0.0000000000 Round 10 — the hot key remembers the last capture mode
 

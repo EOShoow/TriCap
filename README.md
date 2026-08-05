@@ -47,6 +47,13 @@ Animated-WebP defaults: **12 fps, ≤ 15 s, long edge ≤ 1440 px, quality 80, l
 | Toolchain | Swift 6.0+ — **Xcode is not required**, Command Line Tools are enough |
 | Dependencies | none at runtime; libwebp is compiled into the binary |
 
+**Building on older SDKs.** The source deliberately avoids relying on `Sendable` annotations that
+only the newest SDKs carry (`CIContext`, `CGColorSpace` and friends gained them recently), so a
+macOS 15-era Command Line Tools install should compile it too. If your default CLT reports an
+SDK/compiler mismatch, `sudo xcode-select -s` to a matching CLT first. That said: **building from
+source is the contributor path, not the install path** — a notarized DMG is the plan for trying
+TriCap out, and until it exists the honest answer to "how do I install this" is "you don't, yet".
+
 TriCap uses only public Apple APIs: ScreenCaptureKit, AppKit/SwiftUI, Core Graphics, Core Text,
 ImageIO, and Carbon's `RegisterEventHotKey`. It does not touch the system screenshot app or any
 private interface.
@@ -283,10 +290,25 @@ menu-bar item is unrelated: it stays a monochrome SF Symbol template so it tints
 
 ---
 
+## What TriCap is — and is not
+
+TriCap is a **notes-first capture tool**: select a region, record a few seconds, get an animated
+WebP and a Markdown/Obsidian reference on the clipboard, pin an image above your work — with zero
+network access, ever. Those four things are the product.
+
+It is **not** a general-purpose screenshot suite and does not compete with one. Snipaste, CleanShot
+and friends have spent a decade on element detection, pixel nudging, capture history, colour
+pickers, HTML pins and twelve annotation tools — if you need those, use them (they're good; run
+both). Chasing that feature set would produce a worse copy of someone else's product and dilute
+the one promise the incumbents structurally can't match: **nothing in this codebase talks to the
+network — no update checks, no telemetry, no activation.** That stays true permanently; a grep for
+URLSession/Network across the source is part of every review round.
+
 ## Not implemented (deliberately)
 
 OCR, scrolling capture, automatic sensitive-information detection, audio, cloud sync, GIF / APNG /
-WebM, a full capture history library, and App Store distribution.
+WebM, a full capture history library, App Store distribution — and the general-purpose screenshot
+feature set described above.
 
 ---
 

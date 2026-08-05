@@ -33,6 +33,28 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.0000000000000 Round 11 — SDK portability fixes and an explicit positioning statement
+
+An external tester on macOS 15.6 could not compile TriCap: Swift 6's concurrency check rejects a
+bare non-isolated `static let` of a type the older SDK does not mark `Sendable`. Two such spots
+existed — `AnnotationRenderer`'s shared `CIContext` (the one the tester hit) and
+`ImageProcessing.outputColorSpace: CGColorSpace` (which would have been next). Both are immutable,
+documented-thread-safe objects; both now live in tiny `@unchecked Sendable` boxes, which compile
+**warning-free on both SDK generations** (a bare `nonisolated(unsafe)` fixes macOS 15 but draws an
+"unnecessary" warning on the macOS 26 SDK — tried and rejected). The existing concurrent-render
+test continues to pin the CIContext's actual thread-safety.
+
+README gains two honesty sections: supported-toolchain notes (source builds are the contributor
+path; a notarized DMG remains the install path and remains blocked on a Developer ID), and a
+"What TriCap is — and is not" statement fixing the positioning after a Snipaste comparison:
+notes-first capture (record → animated WebP → Markdown/Obsidian reference, pins, zero network) —
+explicitly **not** a general-purpose screenshot suite, and the zero-network promise is permanent.
+The no-network grep was re-run this round: clean.
+
+**Unverified**: the fix is verified by inspection and by a clean warning-free build on the macOS
+26 SDK; an actual macOS 15.x CLT build was not possible on this machine — the tester's
+environment is the real test, and this is exactly the class of gap a CI matrix would close.
+
 ## 0.000000000000 Round 10c — the third slider becomes a real player
 
 User read the trim UI as "Start, End… and a third mystery slider". Root cause was presentation:

@@ -164,13 +164,22 @@ public enum AnnotationRenderer {
     ///
     /// Working and output space are both sRGB, matching the renderer's canvas, so no conversion
     /// sneaks in between the snapshot and the redraw.
-    private static let mosaicContext: CIContext = {
+    /// The `@unchecked Sendable` box exists for SDK portability, not as a shortcut: `CIContext`
+    /// is documented immutable and thread-safe, and the concurrent-render test pins that six
+    /// parallel renders through this one context produce byte-identical output. The macOS 26 SDK
+    /// marks `CIContext` `Sendable` (so a bare `static let` compiles there, and an explicit
+    /// `nonisolated(unsafe)` draws an "unnecessary" warning); the macOS 15 SDK does not, and a
+    /// bare `static let` fails Swift 6's concurrency check — the exact build failure a tester hit
+    /// on macOS 15.6. The box compiles clean on both.
+    private struct SendableCIContext: @unchecked Sendable { let context: CIContext }
+    private static var mosaicContext: CIContext { mosaicContextBox.context }
+    private static let mosaicContextBox: SendableCIContext = {
         let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
-        return CIContext(options: [
+        return SendableCIContext(context: CIContext(options: [
             .workingColorSpace: srgb,
             .outputColorSpace: srgb,
             .cacheIntermediates: false,
-        ])
+        ]))
     }()
 
     /// Pixelate a region with Core Image's `CIPixellate`.

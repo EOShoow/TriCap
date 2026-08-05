@@ -13,7 +13,14 @@ import UniformTypeIdentifiers
 public enum ImageProcessing {
 
     /// The one colour space TriCap ever renders into.
-    public static let outputColorSpace: CGColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    /// `CGColorSpace` is an immutable CF object, safe from any thread — but only the newest SDKs
+    /// mark it `Sendable`. A bare `static let` therefore fails to compile against the macOS 15
+    /// SDK (a tester hit exactly this class of error on macOS 15.6), while `nonisolated(unsafe)`
+    /// draws an "unnecessary" warning on the macOS 26 SDK. The `@unchecked Sendable` box carries
+    /// the guarantee explicitly and compiles clean on both.
+    private struct SendableColorSpace: @unchecked Sendable { let space: CGColorSpace }
+    private static let srgb = SendableColorSpace(space: CGColorSpace(name: CGColorSpace.sRGB)!)
+    public static var outputColorSpace: CGColorSpace { srgb.space }
 
     /// `noneSkipLast` = opaque RGBX. Combined with `.byteOrder32Big` the bytes are literally R,G,B,X.
     public static let outputBitmapInfo: CGBitmapInfo = CGBitmapInfo(

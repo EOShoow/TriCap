@@ -29,7 +29,7 @@ struct EditorView: View {
             HStack(spacing: 2) {
                 ForEach(AnnotationTool.allCases) { tool in
                     Button {
-                        model.tool = tool
+                        model.selectTool(tool)
                     } label: {
                         Image(systemName: tool.symbolName)
                             .frame(width: 26, height: 20)
@@ -37,9 +37,9 @@ struct EditorView: View {
                     .buttonStyle(.borderless)
                     .background(
                         RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(model.tool == tool ? Color.accentColor : .clear)
+                            .fill(model.tool == tool && !model.isCropping ? Color.accentColor : .clear)
                     )
-                    .foregroundStyle(model.tool == tool ? Color.white : Color.primary)
+                    .foregroundStyle(model.tool == tool && !model.isCropping ? Color.white : Color.primary)
                     .help(tool.toolTip)
                     .keyboardShortcut(
                         KeyEquivalent(Character("\(tool.shortcutNumber)")),
@@ -47,6 +47,24 @@ struct EditorView: View {
                     )
                     .accessibilityLabel(tool.displayName)
                 }
+
+                // Crop sits with the tools but is not an annotation: it changes what the export
+                // keeps, not what is drawn, so it lives outside `AnnotationTool`.
+                Button {
+                    model.toggleCropTool()
+                } label: {
+                    Image(systemName: "crop")
+                        .frame(width: 26, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(model.isCropping ? Color.accentColor : .clear)
+                )
+                .foregroundStyle(model.isCropping ? Color.white : Color.primary)
+                .help("Crop — drag to keep a region; the export cuts everything else (\u{2318}6)")
+                .keyboardShortcut("6", modifiers: .command)
+                .accessibilityLabel("Crop")
             }
             .padding(2)
             .background(
@@ -55,7 +73,7 @@ struct EditorView: View {
             )
 
             // Naming the active tool removes the guesswork from a row of glyphs.
-            Text(model.tool.displayName)
+            Text(model.isCropping ? "Crop" : model.tool.displayName)
                 .font(.callout.weight(.medium))
                 .frame(width: 74, alignment: .leading)
 
@@ -152,7 +170,10 @@ struct EditorView: View {
             items: model.document.items,
             tool: model.tool,
             style: model.style,
-            onCommit: { model.add($0) }
+            cropRect: model.cropRect,
+            isCropActive: model.isCropping,
+            onCommit: { model.add($0) },
+            onCropCommitted: { model.commitCropDrag(from: $0, to: $1) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -268,9 +289,16 @@ struct EditorView: View {
             }
 
             HStack(spacing: 12) {
-                Text("\(Int(model.canvasSize.width)) × \(Int(model.canvasSize.height)) px")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                if model.cropRect != nil {
+                    Text("\(Int(model.outputPixelSize.width)) × \(Int(model.outputPixelSize.height)) px, cropped from \(Int(model.canvasSize.width)) × \(Int(model.canvasSize.height))")
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Button("Reset crop") { model.resetCrop() }
+                } else {
+                    Text("\(Int(model.canvasSize.width)) × \(Int(model.canvasSize.height)) px")
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
 
                 if !model.source.isClip {
                     Picker("Format", selection: $model.format) {

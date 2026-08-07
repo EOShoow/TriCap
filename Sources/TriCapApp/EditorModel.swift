@@ -32,6 +32,13 @@ public final class EditorModel: ObservableObject {
     @Published public var style = AnnotationStyle()
     @Published public var format: OutputFormat
 
+    /// Committed crop, in canvas pixels — always integral, always inside the canvas, never the
+    /// full canvas (``CropGeometry/effectiveCrop(_:canvasSize:)`` collapses that to `nil`).
+    /// Applies to the export only; annotations keep full-canvas coordinates.
+    @Published public var cropRect: CGRect?
+    /// Whether the crop tool is active on the canvas. Mutually exclusive with drawing tools.
+    @Published public var isCropping = false
+
     /// Inclusive trim handles, in original frame indices.
     @Published public var trimStart = 0
     @Published public var trimEnd = 0
@@ -271,6 +278,32 @@ public final class EditorModel: ObservableObject {
         document.add(item)
     }
 
+    /// Picking a drawing tool leaves crop mode; the two interpret drags differently.
+    public func selectTool(_ newTool: AnnotationTool) {
+        tool = newTool
+        isCropping = false
+    }
+
+    public func toggleCropTool() {
+        isCropping.toggle()
+    }
+
+    /// Pixel size of what the export will produce.
+    public var outputPixelSize: CGSize { cropRect?.size ?? canvasSize }
+
+    /// Commit a finished crop drag (canvas pixel coordinates, any corner order).
+    ///
+    /// A degenerate drag keeps the existing crop — a slip of the mouse must not destroy a
+    /// carefully placed rectangle. A drag covering the whole canvas clears the crop.
+    public func commitCropDrag(from a: CGPoint, to b: CGPoint) {
+        guard let rect = CropGeometry.cropRect(dragFrom: a, to: b, canvasSize: canvasSize) else { return }
+        cropRect = CropGeometry.effectiveCrop(rect, canvasSize: canvasSize)
+    }
+
+    public func resetCrop() {
+        cropRect = nil
+    }
+
     public func undo() { document.undo() }
     public func redo() { document.redo() }
     public func clearAnnotations() { document.clear() }
@@ -289,6 +322,8 @@ public final class EditorModel: ObservableObject {
         let annotations = document.items
         let baseName = OutputFileWriter.baseName(prefix: settings.filenamePrefix, date: Date())
 
+        let crop = CropGeometry.effectiveCrop(cropRect, canvasSize: canvasSize)
+
         switch source {
         case .still(let still):
             let image = still.image
@@ -305,7 +340,8 @@ public final class EditorModel: ObservableObject {
                         baseName: baseName,
                         vaultRoot: settings.markdownVaultRootURL,
                         linkStyle: settings.markdownLinkStyle,
-                        colorSpaceNotice: notice
+                        colorSpaceNotice: notice,
+                        cropRect: crop
                     )
                     await self.finishExport(.success(result))
                 } catch {
@@ -360,7 +396,8 @@ public final class EditorModel: ObservableObject {
                         preEncoded: artifact,
                         progress: { value in
                             Task { @MainActor in self.exportProgress = value }
-                        }
+                        },
+                        cropRect: crop
                     )
                     await self.finishExport(.success(result))
                 } catch {

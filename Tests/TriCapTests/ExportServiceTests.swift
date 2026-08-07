@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import AnnotationCore
 @testable import CaptureCore
@@ -419,5 +420,191 @@ struct StaticRecordingExportTests {
         #expect(result.collapsedToSingleFrame == false)
         #expect(result.container == .webpAnimated)
         #expect(result.submittedFrameCount == 6)
+    }
+}
+
+// MARK: - Crop
+
+@Suite("Export service — crop")
+struct CropExportTests {
+
+    /// Four solid quadrants, described in **row space** (top-left origin): TL red, TR green,
+    /// BL blue, BR white. Distinct per quadrant so a mirrored or shifted crop cannot pass.
+    private func quadrants(width: Int, height: Int) -> CGImage {
+        let ctx = ImageProcessing.makeContext(width: width, height: height)!
+        let w = CGFloat(width) / 2
+        let h = CGFloat(height) / 2
+        // The context is bottom-left origin, so "top" in row space is the *upper* context half.
+        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: h, width: w, height: h))          // row-space top-left
+        ctx.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: w, y: h, width: w, height: h))          // row-space top-right
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))          // row-space bottom-left
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: w, y: 0, width: w, height: h))          // row-space bottom-right
+        return ctx.makeImage()!
+    }
+
+    private func pixel(_ image: CGImage, x: Int, y: Int) -> (UInt8, UInt8, UInt8) {
+        let raster = ImageProcessing.rgbxBytes(image)!
+        let offset = y * raster.stride + x * 4
+        return (raster.bytes[offset], raster.bytes[offset + 1], raster.bytes[offset + 2])
+    }
+
+    private func decodePNG(at url: URL) throws -> CGImage {
+        let data = try Data(contentsOf: url)
+        let source = try #require(CGImageSourceCreateWithData(data as CFData, nil))
+        return try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    }
+
+    @Test("A cropped still keeps exactly the requested pixels — row space, no mirror")
+    func stillCropTakesTheRightPixels() throws {
+        let scratch = try Scratch()
+        let image = quadrants(width: 40, height: 40)
+
+        // The row-space top-right quadrant. A y-flipped implementation would return the white
+        // bottom-right quadrant instead; a shifted one would catch quadrant borders.
+        let result = try ExportService.exportStill(
+            image: image,
+            annotations: [],
+            format: .png,
+            quality: 100,
+            directory: scratch.root,
+            baseName: "crop",
+            vaultRoot: nil,
+            linkStyle: .markdown,
+            cropRect: CGRect(x: 20, y: 0, width: 20, height: 20)
+        )
+
+        #expect(result.pixelSize == CGSize(width: 20, height: 20))
+        let out = try decodePNG(at: result.url)
+        #expect(out.width == 20 && out.height == 20)
+        for (x, y) in [(1, 1), (10, 10), (18, 18)] {
+            let p = pixel(out, x: x, y: y)
+            #expect(p.0 < 80 && p.1 > 180 && p.2 < 80,
+                    "expected the green top-right quadrant at (\(x), \(y)), got \(p)")
+        }
+    }
+
+    @Test("Annotations keep full-canvas coordinates; the crop is cut afterwards")
+    func annotationsAnchorBeforeCrop() throws {
+        let scratch = try Scratch()
+        let image = WebPTestImages.solid(width: 40, height: 40, red: 1, green: 1, blue: 1)
+
+        var style = AnnotationStyle(color: .red)
+        style.filled = true
+        // Canvas coordinates (10, 10)–(16, 16); inside the crop that region is (2, 2)–(8, 8).
+        let annotation = AnnotationItem(
+            shape: .rectangle(CGRect(x: 10, y: 10, width: 6, height: 6)), style: style
+        )
+
+        let result = try ExportService.exportStill(
+            image: image,
+            annotations: [annotation],
+            format: .png,
+            quality: 100,
+            directory: scratch.root,
+            baseName: "anchored",
+            vaultRoot: nil,
+            linkStyle: .markdown,
+            cropRect: CGRect(x: 8, y: 8, width: 24, height: 24)
+        )
+
+        let out = try decodePNG(at: result.url)
+        let inside = pixel(out, x: 5, y: 5)
+        #expect(inside.0 > 180 && inside.1 < 90,
+                "the annotation must land at crop-relative (2,2)–(8,8); got \(inside) at (5,5)")
+        let outside = pixel(out, x: 20, y: 20)
+        #expect(outside.0 > 200 && outside.1 > 200 && outside.2 > 200,
+                "away from the annotation the crop shows the white base; got \(outside)")
+    }
+
+    @Test("A cropped animation writes a file whose canvas is the crop")
+    func animationCropShrinksCanvas() throws {
+        let scratch = try Scratch()
+
+        let result = try ExportService.exportAnimation(
+            source: AnimationExportTests.source(count: 3),
+            annotations: [],
+            options: AnimatedWebPOptions(quality: 100, loopCount: 0, lossless: true),
+            directory: scratch.root,
+            baseName: "cropped-clip",
+            vaultRoot: nil,
+            linkStyle: .markdown,
+            cropRect: CGRect(x: 48, y: 0, width: 48, height: 32)
+        )
+
+        #expect(result.pixelSize == CGSize(width: 48, height: 32))
+        let data = try Data(contentsOf: result.url)
+        let frames = try decodeAllFrames(data: data, width: 48, height: 32)
+        #expect(frames.count == 3)
+    }
+
+    @Test("A matching pre-encoded artifact is NOT reused when the export is cropped")
+    func cropDefeatsPreEncodeReuse() throws {
+        let scratch = try Scratch()
+        let options = AnimatedWebPOptions(quality: 100, loopCount: 0, lossless: true)
+
+        // A real full-canvas artifact whose metadata matches the source exactly — the strongest
+        // possible reuse candidate.
+        let full = try ExportService.exportAnimation(
+            source: AnimationExportTests.source(count: 3),
+            annotations: [],
+            options: options,
+            directory: scratch.root,
+            baseName: "full",
+            vaultRoot: nil,
+            linkStyle: .markdown
+        )
+        let source = AnimationExportTests.source(count: 3)
+        let artifact = PreEncodedAnimation(
+            data: try Data(contentsOf: full.url),
+            canvasSize: source.canvasSize,
+            options: options,
+            frameCount: source.frameCount,
+            timestampsMs: source.timestampsMs,
+            endTimestampMs: source.endTimestampMs
+        )
+
+        // If the crop failed to defeat reuse, the artifact's 96×64 canvas would be written and
+        // the post-write canvas verification would throw — success alone proves the fallback.
+        let cropped = try ExportService.exportAnimation(
+            source: source,
+            annotations: [],
+            options: options,
+            directory: scratch.root,
+            baseName: "cropped",
+            vaultRoot: nil,
+            linkStyle: .markdown,
+            preEncoded: artifact,
+            cropRect: CGRect(x: 0, y: 32, width: 96, height: 32)
+        )
+        #expect(cropped.pixelSize == CGSize(width: 96, height: 32))
+        let info = try WebPCodec.inspectAnimation(data: try Data(contentsOf: cropped.url))
+        #expect(info.canvasWidth == 96 && info.canvasHeight == 32)
+    }
+
+    @Test("A crop that is not integral or not inside the canvas is refused")
+    func invalidCropIsRefused() throws {
+        let scratch = try Scratch()
+        for bad in [
+            CGRect(x: 0.5, y: 0, width: 20, height: 20),      // fractional origin
+            CGRect(x: 0, y: 0, width: 20.25, height: 20),     // fractional size
+            CGRect(x: 80, y: 0, width: 40, height: 20),       // spills past the right edge
+        ] {
+            #expect(throws: TriCapError.self) {
+                _ = try ExportService.exportAnimation(
+                    source: AnimationExportTests.source(count: 2),
+                    annotations: [],
+                    options: AnimatedWebPOptions(),
+                    directory: scratch.root,
+                    baseName: "bad-crop",
+                    vaultRoot: nil,
+                    linkStyle: .markdown,
+                    cropRect: bad
+                )
+            }
+        }
     }
 }

@@ -51,6 +51,8 @@ public enum PreEncodeReuse {
         case frameRangeChanged(preEncoded: Int, requested: Int)
         /// Annotations have to be composited onto each frame.
         case hasAnnotations(count: Int)
+        /// The export is cropped, so every frame must be re-rendered at the cropped canvas.
+        case cropped(rect: CGRect)
         case canvasChanged(preEncoded: CGSize, requested: CGSize)
         case optionsChanged(field: String)
         /// Trimming can leave the frame count intact while moving the timeline.
@@ -67,6 +69,8 @@ public enum PreEncodeReuse {
             case .frameRangeChanged(let pre, let requested):
                 return "frame range changed (\(pre) pre-encoded, \(requested) requested)"
             case .hasAnnotations(let count): return "\(count) annotation(s) must be composited"
+            case .cropped(let rect):
+                return "cropped to \(Int(rect.width))×\(Int(rect.height)) at (\(Int(rect.minX)), \(Int(rect.minY)))"
             case .canvasChanged(let pre, let requested):
                 return "canvas changed (\(Int(pre.width))×\(Int(pre.height)) → \(Int(requested.width))×\(Int(requested.height)))"
             case .optionsChanged(let field): return "\(field) changed"
@@ -82,6 +86,7 @@ public enum PreEncodeReuse {
     ///
     /// - the whole recording, untrimmed (same frame count *and* same timestamps)
     /// - no annotations, since those are composited per frame
+    /// - no crop, since the artifact holds full-canvas frames
     /// - the same canvas
     /// - the same encoder parameters, all four of them
     /// - the same end timestamp, which fixes the final frame's duration
@@ -89,13 +94,17 @@ public enum PreEncodeReuse {
         artifact: PreEncodedAnimation?,
         source: AnimationFrameSource,
         annotationCount: Int,
-        options: AnimatedWebPOptions
+        options: AnimatedWebPOptions,
+        cropRect: CGRect? = nil
     ) -> Decision {
         guard let artifact else { return .noArtifact }
         guard artifact.frameCount == source.frameCount else {
             return .frameRangeChanged(preEncoded: artifact.frameCount, requested: source.frameCount)
         }
         guard annotationCount == 0 else { return .hasAnnotations(count: annotationCount) }
+        // A crop invalidates the artifact unconditionally: the pre-encoded file holds full-canvas
+        // frames, and reusing it would silently export the uncropped recording.
+        if let cropRect { return .cropped(rect: cropRect) }
         guard artifact.canvasSize == source.canvasSize else {
             return .canvasChanged(preEncoded: artifact.canvasSize, requested: source.canvasSize)
         }

@@ -33,6 +33,46 @@ The working tree is left exactly as verified below.
 
 ---
 
+## 0.00000000000000 Round 12 — three-flow picker with quick-save, and an export crop
+
+Two user features, two commits.
+
+**Three-flow picker (`4b4383c`).** The picker's two modes and the `stillCaptureAction` fork are
+collapsed into one `CaptureFlow`: quick screenshot (clipboard + **new** background save to the
+output folder), screenshot-to-editor, recording. `R` (and Space/Tab) cycles them in that order;
+`S` still jumps to the edit flow; the banner names the current flow, colours its dot
+(green/accent/red) and tells you what `R` cycles to next. `rememberLast` now remembers all three
+states via `AppSettings.lastCaptureFlow`; the legacy `lastCaptureIntent` is still written as a
+downgrade mirror, and old blobs migrate exactly — `(lastCaptureIntent × stillCaptureAction)`
+recovers the flow the user actually had, and an unreadable future flow value falls back to that
+migration seed, not to the factory default. The quick flow's clipboard write remains the
+deliverable: save failures warn without un-succeeding the copy; a refused clipboard still offers
+the editor. SelectionUI's private `CaptureMode` is gone; the picker speaks `CaptureFlow` directly.
+
+**Export crop (this commit).** The editor gains a crop tool (toolbar `crop` glyph, ⌘6): drag to
+keep a region, dimmed surround with a live size readout, `Reset crop` in the footer, output size
+shown as "W × H, cropped from W₀ × H₀". Semantics, all pinned by tests:
+
+- **Annotations before crop, always.** Annotation coordinates stay anchored to the full canvas;
+  the crop is the last pipeline step (`CropExportTests/annotationsAnchorBeforeCrop`).
+- **Row space, no mirror.** The cut uses `CGImage.cropping(to:)` in the same space annotations
+  live in; a quadrant image pins that the *right* pixels survive
+  (`stillCropTakesTheRightPixels` — the mosaic's mirrored-band lesson, now a regression test).
+- **Crop defeats pre-encode reuse unconditionally** (`PreEncodeReuse.Decision.cropped`). The
+  strongest possible reuse candidate — a byte-real full-canvas artifact with matching metadata —
+  is proven to take the slow path end-to-end (`cropDefeatsPreEncodeReuse`); had it been reused,
+  the post-write canvas verification would have failed the export.
+- **Fail-closed validation**: a non-integral or out-of-canvas crop is refused by
+  `exportAnimation`, not silently clamped; `CropGeometry` (TriCapKit, pure, tested) is the only
+  producer of crop rects, and it emits integral, clamped, non-no-op rects only (a full-canvas
+  "crop" collapses to nil so it cannot force a pointless re-encode).
+
+**Unverified, honestly:** everything interactive — the crop drag feel, the dimmed-overlay look,
+the badge readability, the three-flow banner colours, the quick-save toast wording — needs human
+eyes. Crop is not in the undo stack (Reset crop is the escape hatch); called out as a known
+limitation, not a bug. The editor preview player plays full-canvas frames with the crop shown as
+an overlay rather than pre-cutting each frame; the exported file is the authority the tests pin.
+
 ## 0.0000000000000 Round 11 — SDK portability fixes and an explicit positioning statement
 
 An external tester on macOS 15.6 could not compile TriCap: Swift 6's concurrency check rejects a

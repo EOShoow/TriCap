@@ -70,15 +70,19 @@ public enum ExportService {
         baseName: String,
         vaultRoot: URL?,
         linkStyle: MarkdownLinkStyle,
-        colorSpaceNotice: String? = nil
+        colorSpaceNotice: String? = nil,
+        cropRect: CGRect? = nil
     ) throws -> ExportResult {
         guard !format.isAnimated else {
             throw TriCapError.encodingFailed("Use exportAnimation for animated WebP.")
         }
 
-        let rendered = annotations.isEmpty
+        // Annotations first, crop last: annotation coordinates are anchored to the full canvas
+        // the user drew on, so cropping earlier would shift every arrow and mosaic.
+        let annotated = annotations.isEmpty
             ? image
             : (AnnotationRenderer.render(items: annotations, onto: image) ?? image)
+        let rendered = try cropped(annotated, to: cropRect)
 
         let data = try StillImageCodec.encode(rendered, format: format, quality: quality)
         let url = try OutputFileWriter.write(
@@ -120,7 +124,8 @@ public enum ExportService {
         colorSpaceNotice: String? = nil,
         preEncoded: PreEncodedAnimation? = nil,
         strategy: AnimationEncodeStrategy = .default,
-        progress: ((Double) -> Void)? = nil
+        progress: ((Double) -> Void)? = nil,
+        cropRect: CGRect? = nil
     ) throws -> ExportResult {
         guard source.frameCount > 0 else { throw TriCapError.noFramesCaptured }
         guard source.timestampsMs.count == source.frameCount else {
@@ -128,6 +133,15 @@ public enum ExportService {
                 "Timeline has \(source.timestampsMs.count) timestamps for \(source.frameCount) frames."
             )
         }
+        if let cropRect {
+            guard CropGeometry.isValid(cropRect, canvasSize: source.canvasSize) else {
+                throw TriCapError.encodingFailed(
+                    "Crop \(cropRect) is not an integral rect inside the \(Int(source.canvasSize.width))×\(Int(source.canvasSize.height)) canvas."
+                )
+            }
+        }
+        // Every check below runs against the canvas the file must actually have.
+        let outputCanvasSize = cropRect?.size ?? source.canvasSize
 
         // The fast path is an optimisation only: it may change how long this takes and nothing
         // else. Everything downstream — writing, re-reading, and every verification below — is
@@ -137,7 +151,8 @@ public enum ExportService {
             artifact: preEncoded,
             source: source,
             annotationCount: annotations.count,
-            options: options
+            options: options,
+            cropRect: cropRect
         )
         let data: Data
         if decision.isReuse, let preEncoded {
@@ -146,7 +161,7 @@ public enum ExportService {
         } else {
             data = try encodeStreaming(
                 source: source, annotations: annotations, options: options,
-                strategy: strategy, progress: progress
+                strategy: strategy, progress: progress, cropRect: cropRect
             )
         }
         TriCapLog.export.info("animation export: \(decision.reason, privacy: .public)")
@@ -165,10 +180,10 @@ public enum ExportService {
             let written = try Data(contentsOf: url, options: [.mappedIfSafe])
             let info = try WebPCodec.inspectAnimation(data: written)
 
-            guard info.canvasWidth == Int(source.canvasSize.width.rounded()),
-                  info.canvasHeight == Int(source.canvasSize.height.rounded()) else {
+            guard info.canvasWidth == Int(outputCanvasSize.width.rounded()),
+                  info.canvasHeight == Int(outputCanvasSize.height.rounded()) else {
                 throw TriCapError.encodingFailed(
-                    "Written animation is \(info.canvasWidth)x\(info.canvasHeight) but should be \(Int(source.canvasSize.width))x\(Int(source.canvasSize.height))."
+                    "Written animation is \(info.canvasWidth)x\(info.canvasHeight) but should be \(Int(outputCanvasSize.width))x\(Int(outputCanvasSize.height))."
                 )
             }
             // libwebp merges a frame that is identical to its predecessor into that frame's
@@ -210,7 +225,7 @@ public enum ExportService {
             return ExportResult(
                 url: url,
                 format: .animatedWebP,
-                pixelSize: source.canvasSize,
+                pixelSize: outputCanvasSize,
                 byteCount: data.count,
                 reference: MarkdownReference.reference(for: url, vaultRoot: vaultRoot, style: linkStyle),
                 container: container,
@@ -227,17 +242,20 @@ public enum ExportService {
         }
     }
 
-    /// Pull each frame, composite the fixed annotation overlay onto it, hand it to libwebp, drop it.
+    /// Pull each frame, composite the fixed annotation overlay onto it, crop, hand it to libwebp,
+    /// drop it. Annotations before crop, always: their coordinates are anchored to the full
+    /// canvas the user drew on.
     private static func encodeStreaming(
         source: AnimationFrameSource,
         annotations: [AnnotationItem],
         options: AnimatedWebPOptions,
         strategy: AnimationEncodeStrategy,
-        progress: ((Double) -> Void)?
+        progress: ((Double) -> Void)?,
+        cropRect: CGRect? = nil
     ) throws -> Data {
         try WebPCodec.encodeAnimationStreaming(
             frameCount: source.frameCount,
-            canvasSize: source.canvasSize,
+            canvasSize: cropRect?.size ?? source.canvasSize,
             endTimestampMs: source.endTimestampMs,
             options: options,
             strategy: strategy,
@@ -250,8 +268,20 @@ public enum ExportService {
             } else {
                 composited = AnnotationRenderer.render(items: annotations, onto: raw) ?? raw
             }
-            return (composited, source.timestampsMs[index])
+            return (try cropped(composited, to: cropRect), source.timestampsMs[index])
         }
+    }
+
+    /// Cut `rect` out of `image` in row space — the same space annotations live in, so the rect
+    /// needs no flip (the lesson the mosaic's mirrored-band defect taught).
+    private static func cropped(_ image: CGImage, to rect: CGRect?) throws -> CGImage {
+        guard let rect else { return image }
+        guard let cut = image.cropping(to: rect) else {
+            throw TriCapError.encodingFailed(
+                "Crop \(rect) produced no pixels from a \(image.width)×\(image.height) frame."
+            )
+        }
+        return cut
     }
 
     // MARK: - Verification

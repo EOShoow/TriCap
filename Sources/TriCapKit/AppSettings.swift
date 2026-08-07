@@ -27,10 +27,15 @@ public enum OutputFormat: String, Codable, CaseIterable, Sendable {
     public var isAnimated: Bool { self == .animatedWebP }
 }
 
-/// What TriCap does with a finished screenshot.
+/// Which still flow a plain "screenshot" request means.
+///
+/// Historically this decided what happened *after* a still capture; since the picker gained the
+/// three-flow cycle it instead resolves the still *family* — the menu's "Capture Region" and the
+/// ``HotKeyLaunchMode/alwaysStill`` launch mode both map through it, so its old meaning survives.
 public enum StillCaptureAction: String, Codable, CaseIterable, Sendable, Identifiable {
-    /// Put it straight on the clipboard and get out of the way. TriCap's default: the common case
-    /// is pasting a screenshot into something, and that should not cost a window and a Save.
+    /// The quick flow: straight to the clipboard, with a copy saved to the output folder in the
+    /// background. TriCap's default: the common case is pasting a screenshot into something, and
+    /// that should not cost a window and a Save.
     case copyToClipboard
     /// Open the annotation editor, where saving is an explicit step.
     case openEditor
@@ -47,9 +52,9 @@ public enum StillCaptureAction: String, Codable, CaseIterable, Sendable, Identif
     public var summary: String {
         switch self {
         case .copyToClipboard:
-            return "The fastest path: capture, then paste. Nothing is written to disk unless you ask for it."
+            return "The fastest path: capture, then paste. A copy also lands in your save folder in the background."
         case .openEditor:
-            return "Annotate first, then save. Use “Screenshot and Edit…” in the menu to do this once without changing the default."
+            return "Annotate first, then save. Press R in the picker (or use “Screenshot and Edit…” in the menu) to do this once without changing the default."
         }
     }
 }
@@ -80,9 +85,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var stillCaptureAction: StillCaptureAction
     /// What the capture hot key opens: a fixed mode, or whatever completed last.
     public var hotKeyLaunchMode: HotKeyLaunchMode
-    /// The mode of the last *completed* selection. Only consulted by ``HotKeyLaunchMode/rememberLast``;
-    /// a cancelled picker never updates it.
+    /// Legacy mirror of ``lastCaptureFlow``, still written so a downgraded build keeps its
+    /// two-state memory. Never read at runtime except as the migration seed for blobs written
+    /// before flows existed.
     public var lastCaptureIntent: CaptureIntent
+    /// The flow of the last *completed* selection. Only consulted by
+    /// ``HotKeyLaunchMode/rememberLast``; a cancelled picker never updates it.
+    public var lastCaptureFlow: CaptureFlow
     /// Directory files are written to.
     public var saveDirectoryPath: String
     /// Optional Markdown/Obsidian vault root. When the output lands inside it, TriCap
@@ -123,6 +132,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         stillCaptureAction: StillCaptureAction = .copyToClipboard,
         hotKeyLaunchMode: HotKeyLaunchMode = .rememberLast,
         lastCaptureIntent: CaptureIntent = .still,
+        lastCaptureFlow: CaptureFlow = .quickStill,
         saveDirectoryPath: String = AppSettings.defaultSaveDirectory.path,
         markdownVaultRootPath: String? = nil,
         markdownLinkStyle: MarkdownLinkStyle = .markdown,
@@ -147,6 +157,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.stillCaptureAction = stillCaptureAction
         self.hotKeyLaunchMode = hotKeyLaunchMode
         self.lastCaptureIntent = lastCaptureIntent
+        self.lastCaptureFlow = lastCaptureFlow
         self.saveDirectoryPath = saveDirectoryPath
         self.markdownVaultRootPath = markdownVaultRootPath
         self.markdownLinkStyle = markdownLinkStyle
@@ -266,6 +277,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
             ?? fallback.hotKeyLaunchMode
         lastCaptureIntent = c.decodeTolerantly(CaptureIntent.self, forKey: .lastCaptureIntent)
             ?? fallback.lastCaptureIntent
+        // Blobs from before flows existed recorded still/recording plus the still-action setting;
+        // together those say exactly which of the three flows the user last completed.
+        lastCaptureFlow = c.decodeTolerantly(CaptureFlow.self, forKey: .lastCaptureFlow)
+            ?? CaptureFlow(legacyIntent: lastCaptureIntent, stillAction: stillCaptureAction)
         saveDirectoryPath = try c.decodeIfPresent(String.self, forKey: .saveDirectoryPath) ?? fallback.saveDirectoryPath
         markdownVaultRootPath = try c.decodeIfPresent(String.self, forKey: .markdownVaultRootPath)
         markdownLinkStyle = c.decodeTolerantly(MarkdownLinkStyle.self, forKey: .markdownLinkStyle) ?? fallback.markdownLinkStyle

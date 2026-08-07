@@ -11,27 +11,12 @@ import TriCapKit
 @MainActor
 public final class RegionSelector {
 
-    /// What the user intends to do with the region being selected.
-    ///
-    /// The mode lives in the overlay (toggled with `R` / `S`) rather than in a pre-selection
-    /// dialog, so one hot key reaches both a screenshot and a recording without an extra click.
-    public enum CaptureMode: String, Sendable, Equatable {
-        case still
-        case recording
-
-        public var toggled: CaptureMode { self == .still ? .recording : .still }
-
-        /// Shown in the overlay's mode banner.
-        public var displayName: String {
-            switch self {
-            case .still: return "Take a screenshot"
-            case .recording: return "Record a clip"
-            }
-        }
-    }
-
+    /// The picker's mode vocabulary is ``CaptureFlow`` itself — quick screenshot, screenshot to
+    /// the editor, or a recording. The flow lives in the overlay (cycled with `R`, `S` jumps to
+    /// the edit flow) rather than in a pre-selection dialog, so one hot key reaches all three
+    /// without an extra click.
     public enum Outcome: Sendable {
-        case selected(CaptureRegion, CaptureMode)
+        case selected(CaptureRegion, CaptureFlow)
         case cancelled
     }
 
@@ -39,7 +24,7 @@ public final class RegionSelector {
     private var views: [SelectionOverlayView] = []
     private var displays: [DisplayGeometry] = []
 
-    private var mode: CaptureMode = .still
+    private var mode: CaptureFlow = .quickStill
     private var anchor: CGPoint?
     private var gesture: SelectionGesture?
 
@@ -69,7 +54,7 @@ public final class RegionSelector {
     ///   click-to-capture-window and leaves only free-form dragging, which is the correct
     ///   degradation when the window list cannot be read.
     public func selectRegion(
-        initialMode: CaptureMode,
+        initialMode: CaptureFlow,
         windowCandidates: [WindowCandidate] = []
     ) async -> Outcome {
         let displays = DisplaySurvey.currentDisplays()
@@ -122,7 +107,7 @@ public final class RegionSelector {
             let view = SelectionOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size))
             view.autoresizingMask = [.width, .height]
             view.delegate = self
-            view.isRecordingMode = mode == .recording
+            view.mode = mode
             window.contentView = view
 
             windows.append(window)
@@ -181,7 +166,7 @@ public final class RegionSelector {
 
     private func applyMode() {
         for view in views {
-            view.isRecordingMode = mode == .recording
+            view.mode = mode
         }
     }
 }
@@ -260,8 +245,9 @@ extension RegionSelector: SelectionOverlayDelegate {
         finish(.cancelled)
     }
 
-    func overlayDidRequestMode(_ requested: CaptureMode?) {
-        mode = requested ?? mode.toggled
+    /// `nil` advances the cycle (the `R` key); a concrete flow jumps straight to it (the `S` key).
+    func overlayDidRequestMode(_ requested: CaptureFlow?) {
+        mode = requested ?? mode.next
         applyMode()
     }
 

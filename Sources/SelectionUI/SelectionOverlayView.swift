@@ -11,8 +11,8 @@ protocol SelectionOverlayDelegate: AnyObject {
     func overlayDidHover(at point: CGPoint)
     func overlayDidEndDrag(at point: CGPoint)
     func overlayDidCancel()
-    /// `nil` toggles; an explicit value selects that mode.
-    func overlayDidRequestMode(_ requested: RegionSelector.CaptureMode?)
+    /// `nil` advances the three-flow cycle; an explicit value selects that flow.
+    func overlayDidRequestMode(_ requested: CaptureFlow?)
 }
 
 /// One full-screen dimming layer with the live selection rectangle punched out of it.
@@ -33,9 +33,10 @@ public final class SelectionOverlayView: NSView {
         didSet { if oldValue != selectionPixelSize { needsDisplay = true } }
     }
 
-    /// Tints the selection border red so the mode is obvious before the user commits.
-    public var isRecordingMode = false {
-        didSet { if oldValue != isRecordingMode { needsDisplay = true } }
+    /// Tints the selection border and banner dot so the flow is obvious before the user commits:
+    /// green for the quick screenshot, the accent colour for the edit flow, red for recording.
+    public var mode: CaptureFlow = .quickStill {
+        didSet { if oldValue != mode { needsDisplay = true } }
     }
 
     /// The window under the pointer, in AppKit global points. Drawn as a highlight while the user
@@ -131,15 +132,19 @@ public final class SelectionOverlayView: NSView {
     }
 
     private var accentColor: NSColor {
-        isRecordingMode ? .systemRed : .controlAccentColor
+        switch mode {
+        case .quickStill: return .systemGreen
+        case .editStill: return .controlAccentColor
+        case .recording: return .systemRed
+        }
     }
 
-    /// `● Recording   R screenshot · Esc cancel` — pinned to the top of every display.
+    /// `● Quick screenshot   R next mode · Esc cancel` — pinned to the top of every display.
+    /// The hint names what `R` cycles *to*, so the three-state cycle explains itself one press
+    /// ahead instead of demanding a mental map.
     private func drawModeBanner(in context: CGContext) {
-        let title = isRecordingMode ? "Record a clip" : "Take a screenshot"
-        let hint = isRecordingMode
-            ? "Click a window or drag     S  screenshot     Esc  cancel"
-            : "Click a window or drag     R  record     Esc  cancel"
+        let title = mode.displayName
+        let hint = "Click a window or drag     R  \(mode.next.displayName.lowercased())     Esc  cancel"
 
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
@@ -214,7 +219,12 @@ public final class SelectionOverlayView: NSView {
     /// Tells the user what happens when they let go — the one thing the overlay never said.
     private func drawReleaseHint(near rect: CGRect, in context: CGContext) {
         guard rect.width >= 90, rect.height >= 40 else { return }
-        let text = (isRecordingMode ? "Release to start recording" : "Release to capture") as NSString
+        let text: NSString
+        switch mode {
+        case .quickStill: text = "Release to copy & save"
+        case .editStill: text = "Release to edit"
+        case .recording: text = "Release to start recording"
+        }
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.9),
@@ -323,12 +333,12 @@ public final class SelectionOverlayView: NSView {
             return
         }
         switch event.charactersIgnoringModifiers?.lowercased() {
-        case "r":
-            delegate?.overlayDidRequestMode(.recording)
-        case "s":
-            delegate?.overlayDidRequestMode(.still)
-        case " ", "\t":
+        case "r", " ", "\t":
+            // One key, three flows: R cycles quick screenshot → edit → recording.
             delegate?.overlayDidRequestMode(nil)
+        case "s":
+            // Muscle-memory jump from the two-mode days: straight to a screenshot with the editor.
+            delegate?.overlayDidRequestMode(.editStill)
         default:
             super.keyDown(with: event)
         }

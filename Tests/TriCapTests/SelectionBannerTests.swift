@@ -135,7 +135,7 @@ struct SelectionBannerTests {
     @Test("Recording mode is unaffected: red-accent banner also survives a full overlap")
     func recordingModeBanner() {
         let rep = render { view in
-            view.isRecordingMode = true
+            view.mode = .recording
             view.globalSelection = CGRect(origin: .zero, size: size)
             view.selectionPixelSize = CGSize(width: 1800, height: 1120)
         }

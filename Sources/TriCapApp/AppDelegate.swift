@@ -285,7 +285,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             GlobalHotKeyMonitor.shared.register(combo, in: .primaryCapture) { [weak self] in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.beginCapture(mode: self.hotKeyLaunchCaptureMode())
+                    self.beginCapture(mode: self.hotKeyLaunchCaptureFlow())
                 }
             }
         }
@@ -310,8 +310,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
-    @objc private func captureRegion() { beginCapture(mode: .still) }
-    @objc private func captureRegionAndEdit() { beginCapture(mode: .still, forceEditor: true) }
+    @objc private func captureRegion() {
+        // "Capture Region" keeps its historical meaning: the still flow the setting names.
+        beginCapture(mode: CaptureFlow(legacyIntent: .still, stillAction: store.settings.stillCaptureAction))
+    }
+    @objc private func captureRegionAndEdit() { beginCapture(mode: .editStill) }
     @objc private func recordRegion() { beginCapture(mode: .recording) }
 
     // MARK: - Pinning
@@ -364,7 +367,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             onOpenSystemSettings: { ScreenRecordingPermission.openSystemSettings() },
             onTryCapture: { [weak self] in
                 self?.closeWelcome()
-                self?.beginCapture(mode: .still)
+                self?.beginCapture(mode: .editStill)
             },
             onOpenSettings: { [weak self] in self?.showSettings() },
             onDismiss: { [weak self] in self?.closeWelcome() }
@@ -429,23 +432,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// has been fully torn down. `recordClip` therefore awaits `RecordingSession.run()` rather
     /// than returning as soon as the HUD is on screen — which is what previously let a second
     /// trigger overwrite the live recorder, HUD, stop target and cancel key.
-    /// The mode the hot key opens with — a fixed choice, or the last completed one.
-    private func hotKeyLaunchCaptureMode() -> RegionSelector.CaptureMode {
-        let intent = store.settings.hotKeyLaunchMode.effectiveIntent(
-            lastUsed: store.settings.lastCaptureIntent
+    /// The flow the hot key opens with — a fixed choice, or the last completed one.
+    private func hotKeyLaunchCaptureFlow() -> CaptureFlow {
+        store.settings.hotKeyLaunchMode.effectiveFlow(
+            lastUsed: store.settings.lastCaptureFlow,
+            stillAction: store.settings.stillCaptureAction
         )
-        return intent == .recording ? .recording : .still
     }
 
     /// Remember what actually completed. Cancellations deliberately do not count: an aborted
-    /// picker says nothing about what the user wants next time.
-    private func rememberCompletedCaptureIntent(_ mode: RegionSelector.CaptureMode) {
-        let intent: CaptureIntent = mode == .recording ? .recording : .still
-        guard store.settings.lastCaptureIntent != intent else { return }
-        store.settings.lastCaptureIntent = intent
+    /// picker says nothing about what the user wants next time. The legacy two-state field is
+    /// mirrored so a downgraded build keeps its memory.
+    private func rememberCompletedCaptureFlow(_ flow: CaptureFlow) {
+        if store.settings.lastCaptureFlow != flow {
+            store.settings.lastCaptureFlow = flow
+        }
+        if store.settings.lastCaptureIntent != flow.legacyIntent {
+            store.settings.lastCaptureIntent = flow.legacyIntent
+        }
     }
 
-    private func beginCapture(mode: RegionSelector.CaptureMode, forceEditor: Bool = false) {
+    private func beginCapture(mode: CaptureFlow) {
         guard gate.tryBegin() else { return }
         toast.dismiss()
         refreshMenu()
@@ -472,18 +479,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             switch outcome {
             case .cancelled:
                 TriCapLog.app.info("capture cancelled at selection")
-            case .selected(let region, .still):
-                rememberCompletedCaptureIntent(.still)
+            case .selected(let region, .quickStill):
+                rememberCompletedCaptureFlow(.quickStill)
                 gate.transition(to: .capturingStill)
-                await captureStill(region: region, forceEditor: forceEditor)
+                await captureStill(region: region, flow: .quickStill)
+            case .selected(let region, .editStill):
+                rememberCompletedCaptureFlow(.editStill)
+                gate.transition(to: .capturingStill)
+                await captureStill(region: region, flow: .editStill)
             case .selected(let region, .recording):
-                rememberCompletedCaptureIntent(.recording)
+                rememberCompletedCaptureFlow(.recording)
                 await recordClip(region: region)
             }
         }
     }
 
-    private func captureStill(region: CaptureRegion, forceEditor: Bool) async {
+    private func captureStill(region: CaptureRegion, flow: CaptureFlow) async {
         // Give the window server one turn to actually remove the overlay before we sample the
         // screen. The content filter already excludes TriCap, but this also avoids catching the
         // dimming layer's fade-out on slower machines.
@@ -491,24 +502,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let still = try await StillCaptureService.capture(region: region)
-
-            // The common case is "capture, then paste", so that is the default: no window, no
-            // file on disk until the user asks for one. `forceEditor` is the menu's
-            // "Screenshot and Edit…", which overrides the setting for one capture.
-            let action = forceEditor ? .openEditor : store.settings.stillCaptureAction
-            switch action {
-            case .openEditor:
+            if flow == .editStill {
                 presentEditor(source: .still(still))
-            case .copyToClipboard:
-                copyStillToClipboard(still)
+            } else {
+                await copyAndSaveStill(still)
             }
         } catch {
             presentCaptureError(error)
         }
     }
 
-    /// Put a finished screenshot on the clipboard, and only claim success if it got there.
-    private func copyStillToClipboard(_ still: CapturedStill) {
+    /// The quick flow: clipboard first, then a background save to the output folder.
+    ///
+    /// The clipboard is the deliverable — it must succeed or the user is offered the editor. The
+    /// file is the paper trail the quick flow used to throw away; a failed save therefore warns
+    /// but never un-succeeds the copy that already happened.
+    private func copyAndSaveStill(_ still: CapturedStill) async {
         guard let receipt = PasteboardImage.write(still.image) else {
             // A refused pasteboard write is recoverable: the capture is still in memory, so offer
             // the editor rather than dropping it on the floor.
@@ -522,8 +531,44 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             wroteRasterData: receipt.wroteRasterData,
             colorNotice: still.colorSpace.userFacingNotice
         )
-        toast.showNotice(notice.message, systemImage: notice.systemImage, isWarning: notice.isWarning)
         TriCapLog.app.info("screenshot copied to clipboard: \(receipt.types.joined(separator: ","), privacy: .public)")
+
+        let settings = store.settings
+        // The animated format cannot hold a still; fall back exactly as the editor does.
+        let format = settings.stillFormat == .animatedWebP ? .png : settings.stillFormat
+        let baseName = OutputFileWriter.baseName(prefix: settings.filenamePrefix, date: Date())
+        let image = still.image
+        let saved: Result<ExportResult, Error> = await Task.detached(priority: .utility) {
+            Result {
+                try ExportService.exportStill(
+                    image: image,
+                    annotations: [],
+                    format: format,
+                    quality: settings.stillQuality,
+                    directory: settings.saveDirectoryURL,
+                    baseName: baseName,
+                    vaultRoot: settings.markdownVaultRootURL,
+                    linkStyle: settings.markdownLinkStyle
+                )
+            }
+        }.value
+
+        switch saved {
+        case .success(let result):
+            toast.showNotice(
+                notice.message + " · Saved \(result.url.lastPathComponent)",
+                systemImage: notice.systemImage,
+                isWarning: notice.isWarning
+            )
+            TriCapLog.app.info("quick screenshot saved: \(result.url.lastPathComponent, privacy: .public)")
+        case .failure(let error):
+            toast.showNotice(
+                notice.message + " · Saving failed — the copy is still on the clipboard.",
+                systemImage: "exclamationmark.triangle",
+                isWarning: true
+            )
+            TriCapLog.app.error("quick screenshot save failed: \(String(describing: error), privacy: .public)")
+        }
     }
 
     private func presentClipboardFailure(_ still: CapturedStill) {

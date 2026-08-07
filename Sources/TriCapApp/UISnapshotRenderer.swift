@@ -198,7 +198,7 @@ enum UISnapshotRenderer {
         let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
 
         let overlay = SelectionOverlayView(frame: container.bounds)
-        overlay.isRecordingMode = recording
+        overlay.mode = recording ? .recording : .quickStill
         container.addSubview(overlay)
 
         // The overlay interprets its selection in AppKit *global* points and converts through its
@@ -295,7 +295,7 @@ enum UISnapshotRenderer {
             overlay.highlightedWindowPixelSize = CGSize(width: 1800, height: 1120)
         case .selectionThroughBanner:
             // A drag that crosses the banner: the punch-out clears everything it covers.
-            overlay.isRecordingMode = true
+            overlay.mode = .recording
             overlay.globalSelection = CGRect(
                 x: windowOrigin.x + 180, y: windowOrigin.y + size.height - 220,
                 width: 540, height: 220
@@ -313,7 +313,7 @@ enum UISnapshotRenderer {
         let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
 
         let overlay = SelectionOverlayView(frame: container.bounds)
-        overlay.isRecordingMode = false
+        overlay.mode = .quickStill
         container.addSubview(overlay)
 
         // Same global-point convention as `selectionOverlaySnapshot`.

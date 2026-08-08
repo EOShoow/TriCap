@@ -39,6 +39,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// encoder rather than leaving it to a deinit that may never run.
     private var livePreEncoder: LivePreEncoder?
 
+    /// Background saves for the quick screenshot flow. Deliberately *not* part of the capture
+    /// session: the gate frees as soon as the clipboard is served, and these finish on their own.
+    private let quickSaveQueue = BackgroundSaveQueue()
+
     /// The single gate every capture entry point goes through. It stays occupied for the whole
     /// pipeline — selection, countdown, recording, teardown and the editor hand-off — so a second
     /// hot-key press or menu click while a recording is live is refused instead of overwriting the
@@ -505,19 +509,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             if flow == .editStill {
                 presentEditor(source: .still(still))
             } else {
-                await copyAndSaveStill(still)
+                copyThenScheduleSave(still)
             }
         } catch {
             presentCaptureError(error)
         }
     }
 
-    /// The quick flow: clipboard first, then a background save to the output folder.
+    /// The quick flow: clipboard first, save in the background — and *only* the clipboard is
+    /// part of the capture session.
     ///
-    /// The clipboard is the deliverable — it must succeed or the user is offered the editor. The
-    /// file is the paper trail the quick flow used to throw away; a failed save therefore warns
-    /// but never un-succeeds the copy that already happened.
-    private func copyAndSaveStill(_ still: CapturedStill) async {
+    /// The clipboard is the deliverable: it must succeed (or the user is offered the editor) and
+    /// its toast shows immediately, never waiting for the disk. The file is the paper trail the
+    /// quick flow used to throw away; its save is handed to ``BackgroundSaveQueue`` and NOT
+    /// awaited, so this returns, `beginCapture`'s defer releases the gate, and the next hot-key
+    /// press is accepted while the write is still running (pinned by
+    /// `QuickSaveOrchestrationTests`). Each save captures an immutable snapshot of the settings
+    /// it needs, so overlapping quick shots cannot read later edits or cross wires; a failed
+    /// save warns afterwards but never un-succeeds the copy that already happened.
+    private func copyThenScheduleSave(_ still: CapturedStill) {
         guard let receipt = PasteboardImage.write(still.image) else {
             // A refused pasteboard write is recoverable: the capture is still in memory, so offer
             // the editor rather than dropping it on the floor.
@@ -531,43 +541,51 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             wroteRasterData: receipt.wroteRasterData,
             colorNotice: still.colorSpace.userFacingNotice
         )
+        toast.showNotice(notice.message, systemImage: notice.systemImage, isWarning: notice.isWarning)
         TriCapLog.app.info("screenshot copied to clipboard: \(receipt.types.joined(separator: ","), privacy: .public)")
 
+        // Immutable per-save snapshot; nothing below reads `store` after this point.
         let settings = store.settings
         // The animated format cannot hold a still; fall back exactly as the editor does.
         let format = settings.stillFormat == .animatedWebP ? .png : settings.stillFormat
+        let quality = settings.stillQuality
+        let directory = settings.saveDirectoryURL
+        let vaultRoot = settings.markdownVaultRootURL
+        let linkStyle = settings.markdownLinkStyle
         let baseName = OutputFileWriter.baseName(prefix: settings.filenamePrefix, date: Date())
         let image = still.image
-        let saved: Result<ExportResult, Error> = await Task.detached(priority: .utility) {
+
+        quickSaveQueue.submit {
             Result {
                 try ExportService.exportStill(
                     image: image,
                     annotations: [],
                     format: format,
-                    quality: settings.stillQuality,
-                    directory: settings.saveDirectoryURL,
+                    quality: quality,
+                    directory: directory,
                     baseName: baseName,
-                    vaultRoot: settings.markdownVaultRootURL,
-                    linkStyle: settings.markdownLinkStyle
+                    vaultRoot: vaultRoot,
+                    linkStyle: linkStyle
                 )
             }
-        }.value
-
-        switch saved {
-        case .success(let result):
-            toast.showNotice(
-                notice.message + " · Saved \(result.url.lastPathComponent)",
-                systemImage: notice.systemImage,
-                isWarning: notice.isWarning
-            )
-            TriCapLog.app.info("quick screenshot saved: \(result.url.lastPathComponent, privacy: .public)")
-        case .failure(let error):
-            toast.showNotice(
-                notice.message + " · Saving failed — the copy is still on the clipboard.",
-                systemImage: "exclamationmark.triangle",
-                isWarning: true
-            )
-            TriCapLog.app.error("quick screenshot save failed: \(String(describing: error), privacy: .public)")
+        } deliver: { [weak self] (saved: Result<ExportResult, Error>) in
+            guard let self else { return }
+            switch saved {
+            case .success(let result):
+                self.toast.showNotice(
+                    "Saved \(result.url.lastPathComponent)",
+                    systemImage: "checkmark.circle",
+                    isWarning: false
+                )
+                TriCapLog.app.info("quick screenshot saved: \(result.url.lastPathComponent, privacy: .public)")
+            case .failure(let error):
+                self.toast.showNotice(
+                    "Saving the screenshot failed — the copy is still on the clipboard.",
+                    systemImage: "exclamationmark.triangle",
+                    isWarning: true
+                )
+                TriCapLog.app.error("quick screenshot save failed: \(String(describing: error), privacy: .public)")
+            }
         }
     }
 

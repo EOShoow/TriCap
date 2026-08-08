@@ -585,6 +585,38 @@ struct CropExportTests {
         #expect(info.canvasWidth == 96 && info.canvasHeight == 32)
     }
 
+    @Test("An invalid STILL crop is refused before anything is written — no silent rounding")
+    func invalidStillCropIsRefused() throws {
+        // An independent probe confirmed `CGImage.cropping(to:)` silently rounds and clips:
+        // x=0.5,w=5.25 → 6×5; x=8,w=5 on a 10-wide image → 2×5; x=-2,w=5 → 3×5. The still path
+        // must therefore validate exactly like the animation path, *before* encoding or writing.
+        let scratch = try Scratch()
+        let image = WebPTestImages.solid(width: 10, height: 10, red: 0.5, green: 0.5, blue: 0.5)
+
+        for bad in [
+            CGRect(x: 0.5, y: 0, width: 5.25, height: 5),   // fractional — cropping rounds to 6×5
+            CGRect(x: 8, y: 0, width: 5, height: 5),        // spills right — cropping clips to 2×5
+            CGRect(x: -2, y: 0, width: 5, height: 5),       // negative — cropping clips to 3×5
+            CGRect(x: 0, y: 0, width: 0, height: 5),        // empty
+        ] {
+            #expect(throws: TriCapError.self, "crop \(bad) must be refused, not silently adjusted") {
+                _ = try ExportService.exportStill(
+                    image: image,
+                    annotations: [],
+                    format: .png,
+                    quality: 100,
+                    directory: scratch.root,
+                    baseName: "bad-still-crop",
+                    vaultRoot: nil,
+                    linkStyle: .markdown,
+                    cropRect: bad
+                )
+            }
+        }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: scratch.root.path)
+        #expect(leftovers.isEmpty, "a refused crop must write nothing, found \(leftovers)")
+    }
+
     @Test("A crop that is not integral or not inside the canvas is refused")
     func invalidCropIsRefused() throws {
         let scratch = try Scratch()

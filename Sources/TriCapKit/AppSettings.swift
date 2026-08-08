@@ -54,7 +54,7 @@ public enum StillCaptureAction: String, Codable, CaseIterable, Sendable, Identif
         case .copyToClipboard:
             return "The fastest path: capture, then paste. A copy also lands in your save folder in the background."
         case .openEditor:
-            return "Annotate first, then save. Press R in the picker (or use “Screenshot and Edit…” in the menu) to do this once without changing the default."
+            return "Annotate first, then save. Cycle to any flow with R in the picker (or use “Screenshot and Edit…” in the menu) without changing this default."
         }
     }
 }

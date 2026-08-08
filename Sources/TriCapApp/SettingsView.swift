@@ -70,7 +70,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("In the picker: **click a window** to capture it, or drag out any area — hold **⌥** while dragging to ignore edge snapping. **R** switches to recording, **S** back to a screenshot, **Esc** cancels.")
+                Text("In the picker: **click a window** to capture it, or drag out any area — hold **⌥** while dragging to ignore edge snapping. **R** cycles quick screenshot → screenshot and edit → recording, **S** jumps straight to screenshot and edit, **Esc** cancels.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
@@ -97,13 +97,18 @@ struct SettingsView: View {
             }
 
             Section {
-                Picker("After a screenshot", selection: $store.settings.stillCaptureAction) {
+                Picker("Default screenshot flow", selection: $store.settings.stillCaptureAction) {
                     ForEach(StillCaptureAction.allCases) { action in
                         Text(action.displayName).tag(action)
                     }
                 }
                 Text(store.settings.stillCaptureAction.summary)
                     .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // Scope, spelled out: this is a *default*, not a rule for every screenshot.
+                Text("Applies to “Capture Region…” in the menu and the “Always screenshot” shortcut mode. In the picker, **R** always cycles all three flows, and “Remember last used” follows whatever you completed last.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Text("Screenshots")

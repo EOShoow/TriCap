@@ -76,6 +76,7 @@ public enum ExportService {
         guard !format.isAnimated else {
             throw TriCapError.encodingFailed("Use exportAnimation for animated WebP.")
         }
+        try validateCrop(cropRect, canvasSize: CGSize(width: image.width, height: image.height))
 
         // Annotations first, crop last: annotation coordinates are anchored to the full canvas
         // the user drew on, so cropping earlier would shift every arrow and mosaic.
@@ -133,13 +134,7 @@ public enum ExportService {
                 "Timeline has \(source.timestampsMs.count) timestamps for \(source.frameCount) frames."
             )
         }
-        if let cropRect {
-            guard CropGeometry.isValid(cropRect, canvasSize: source.canvasSize) else {
-                throw TriCapError.encodingFailed(
-                    "Crop \(cropRect) is not an integral rect inside the \(Int(source.canvasSize.width))×\(Int(source.canvasSize.height)) canvas."
-                )
-            }
-        }
+        try validateCrop(cropRect, canvasSize: source.canvasSize)
         // Every check below runs against the canvas the file must actually have.
         let outputCanvasSize = cropRect?.size ?? source.canvasSize
 
@@ -269,6 +264,22 @@ public enum ExportService {
                 composited = AnnotationRenderer.render(items: annotations, onto: raw) ?? raw
             }
             return (try cropped(composited, to: cropRect), source.timestampsMs[index])
+        }
+    }
+
+    /// The one crop gate for stills and animations alike, run against the true source canvas
+    /// before any encoding or writing.
+    ///
+    /// This cannot be left to `CGImage.cropping(to:)`: probed on this system, it silently rounds
+    /// and clips instead of failing — x=0.5, w=5.25 became a 6×5 image; x=8, w=5 on a 10-wide
+    /// image became 2×5; x=-2, w=5 became 3×5. A crop the editor never produced must be an
+    /// error, not a slightly different file.
+    private static func validateCrop(_ cropRect: CGRect?, canvasSize: CGSize) throws {
+        guard let cropRect else { return }
+        guard CropGeometry.isValid(cropRect, canvasSize: canvasSize) else {
+            throw TriCapError.encodingFailed(
+                "Crop \(cropRect) is not an integral rect inside the \(Int(canvasSize.width))×\(Int(canvasSize.height)) canvas."
+            )
         }
     }
 

@@ -85,11 +85,11 @@ public enum HotKeyLaunchMode: String, Codable, CaseIterable, Sendable, Identifia
     public var summary: String {
         switch self {
         case .alwaysStill:
-            return "The shortcut always opens ready for a screenshot. Press R to cycle to editing or recording."
+            return "The shortcut always opens ready for a screenshot — quick or edit, following the Default screenshot flow setting. R cycles quick screenshot → screenshot and edit → recording."
         case .alwaysRecording:
-            return "The shortcut always opens ready to record. Press R to cycle modes, S to jump to a screenshot."
+            return "The shortcut always opens ready to record. R cycles quick screenshot → screenshot and edit → recording; S jumps straight to screenshot and edit."
         case .rememberLast:
-            return "The shortcut opens in whichever mode you completed last. The banner at the top always shows which one; R cycles quick screenshot → edit → recording."
+            return "The shortcut opens in whichever flow you completed last — the banner at the top always shows which one. R cycles quick screenshot → screenshot and edit → recording."
         }
     }
 

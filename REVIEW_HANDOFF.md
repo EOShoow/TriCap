@@ -73,6 +73,56 @@ eyes. Crop is not in the undo stack (Reset crop is the escape hatch); called out
 limitation, not a bug. The editor preview player plays full-canvas frames with the crop shown as
 an overlay rather than pre-cutting each frame; the exported file is the authority the tests pin.
 
+### Round 12 — Codex rework (TRICAP-R12-REWORK-20260808): three P2s
+
+**P2-1 · The quick screenshot's save no longer blocks the next capture.** Confirmed finding: the
+capture Task awaited the detached save, so the `CaptureSessionGate` stayed occupied for the whole
+disk write — a second hot-key press was silently refused and the success toast waited for the
+disk. Fix: `BackgroundSaveQueue` (CaptureCore, next to the gate) is the extracted orchestration
+boundary — `submit` returns at scheduling time, never at completion. `AppDelegate` now shows the
+clipboard toast immediately, snapshots every setting the save needs (format, quality, directory,
+vault, link style, timestamped base name, image) into immutables at submit time, ends the
+session, and the save's own toast (`Saved <file>` / failure warning) arrives whenever the write
+finishes. Overlapping saves each carry their own snapshot and completion; filename collisions
+were already handled by the exclusive-create claim strategies. `QuickSaveOrchestrationTests`
+drives the **real gate** through AppDelegate's exact sequence with the save deliberately blocked
+on a semaphore: the next `tryBegin()` must succeed with `refusedEntries == 0` while
+`inFlightCount == 1`, outcomes correlate under out-of-order completion, and a synchronous
+main-actor submit cannot deadlock. Honest limit: the old AppDelegate wiring was untestable (that
+was the finding), so the tests pin the new boundary rather than failing against the old one; the
+selection/capture phases remain fully gated as before. Quitting the app with a save still in
+flight is not awaited — pre-existing shape, now recorded.
+
+**P2-2 · Settings copy matches the three-flow reality.** `01-settings-general.png` regenerated
+and inspected: the picker hint now reads "R cycles quick screenshot → screenshot and edit →
+recording, S jumps straight to screenshot and edit, Esc cancels" (the stale "R switches to
+recording, S back to a screenshot" is gone); "After a screenshot" is now **"Default screenshot
+flow"** with an explicit scope caption — applies to "Capture Region…" and the "Always screenshot"
+shortcut mode; R always cycles all three flows in the picker; "Remember last used" follows what
+was completed last. All three `HotKeyLaunchMode` summaries name the full cycle. No behaviour or
+migration changed — copy only (plus the same wording in `StillCaptureAction.openEditor`'s
+summary). Other snapshots regenerated alongside; only 01 was expected to change and the rest were
+not re-read pixel by pixel.
+
+**P2-3 · Still crop is fail-closed, same gate as animation.** Confirmed finding:
+`CGImage.cropping` silently rounds/clips (probed: x=0.5,w=5.25 → 6×5; x=8,w=5 on 10 → 2×5;
+x=-2,w=5 → 3×5), and `exportStill` called it unvalidated while `exportAnimation` checked first.
+Fix: one `validateCrop(_:canvasSize:)` helper, called by both paths against the true source
+canvas before any encoding or writing; the animation path's inline guard was replaced by the same
+helper (fork eliminated). Evidence sequence: `invalidStillCropIsRefused` was written first and
+**failed on the pre-fix build with 4 issues** — three invalid crops exported silently and left
+`bad-still-crop*.png` files — then passed after the fix, including the nothing-written assertion.
+All prior crop semantics (annotations-then-crop, row space, `PreEncodeReuse.cropped`) untouched
+and still green.
+
+**Verification:** targeted suites (`CropExportTests` 6/6, `QuickSaveOrchestrationTests` 3/3);
+full run **511 tests / 72 suites green**; Debug and Release builds with
+`-Xswiftc -warnings-as-errors` clean; `build-app.sh debug` assembled and codesign
+`--verify --deep --strict` passes ("valid on disk", "satisfies its Designated Requirement");
+`git diff --check` clean. **Still unverified by a human:** the live feel of back-to-back quick
+screenshots (gate free during save), the deferred save toast timing, and the settings page
+wording in situ — snapshot-verified only.
+
 ## 0.0000000000000 Round 11 — SDK portability fixes and an explicit positioning statement
 
 An external tester on macOS 15.6 could not compile TriCap: Swift 6's concurrency check rejects a

@@ -572,15 +572,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch saved {
             case .success(let result):
-                self.toast.showNotice(
+                self.toast.enqueueNotice(
                     "Saved \(result.url.lastPathComponent)",
                     systemImage: "checkmark.circle",
                     isWarning: false
                 )
                 TriCapLog.app.info("quick screenshot saved: \(result.url.lastPathComponent, privacy: .public)")
             case .failure(let error):
-                self.toast.showNotice(
-                    "Saving the screenshot failed — the copy is still on the clipboard.",
+                self.toast.enqueueNotice(
+                    "Background save for \(baseName) failed. The screenshot was copied at capture time.",
                     systemImage: "exclamationmark.triangle",
                     isWarning: true
                 )

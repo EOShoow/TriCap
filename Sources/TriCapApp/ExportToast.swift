@@ -1,4 +1,5 @@
 import AppKit
+import CaptureCore
 import ExportCore
 import SwiftUI
 import TriCapKit
@@ -10,9 +11,16 @@ import TriCapKit
 @MainActor
 final class ExportToastPresenter {
 
+    private struct PendingNotice: Sendable {
+        let message: String
+        let systemImage: String
+        let isWarning: Bool
+    }
+
     private var window: NSWindow?
     private var dismissTimer: Timer?
     private var revealURL: URL?
+    private var queuedNotices = TransientNoticeQueue<PendingNotice>()
 
     /// How long the toast stays up when the user does not interact with it.
     static let visibleDuration: TimeInterval = 6
@@ -22,7 +30,7 @@ final class ExportToastPresenter {
     static let minimumHeight: CGFloat = 132
 
     func show(summary: ExportSummary, fileURL: URL, thumbnail: NSImage?) {
-        dismiss()
+        closeCurrent()
         revealURL = fileURL
 
         let content = ToastView(
@@ -82,9 +90,29 @@ final class ExportToastPresenter {
     /// in the same corner, but carries no thumbnail and no Show-in-Finder action because there is
     /// nothing to reveal.
     func showNotice(_ message: String, systemImage: String, isWarning: Bool) {
-        dismiss()
+        closeCurrent()
+        presentNotice(PendingNotice(message: message, systemImage: systemImage, isWarning: isWarning))
+    }
 
-        let hosting = NSHostingView(rootView: NoticeView(message: message, systemImage: systemImage, isWarning: isWarning))
+    /// Queue a follow-up notice behind whatever is currently visible. Background save results use
+    /// this path so an older disk write can never replace a newer screenshot's immediate clipboard
+    /// confirmation. Each result keeps its own captured message and is shown FIFO.
+    func enqueueNotice(_ message: String, systemImage: String, isWarning: Bool) {
+        let notice = PendingNotice(message: message, systemImage: systemImage, isWarning: isWarning)
+        guard let immediate = queuedNotices.enqueue(notice, presenterIsBusy: window != nil) else {
+            return
+        }
+        presentNotice(immediate)
+    }
+
+    private func presentNotice(_ notice: PendingNotice) {
+        let hosting = NSHostingView(
+            rootView: NoticeView(
+                message: notice.message,
+                systemImage: notice.systemImage,
+                isWarning: notice.isWarning
+            )
+        )
         hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: 1)
         hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: max(52, hosting.fittingSize.height))
 
@@ -120,6 +148,13 @@ final class ExportToastPresenter {
     }
 
     func dismiss() {
+        closeCurrent()
+        if let next = queuedNotices.next() {
+            presentNotice(next)
+        }
+    }
+
+    private func closeCurrent() {
         dismissTimer?.invalidate()
         dismissTimer = nil
         window?.orderOut(nil)

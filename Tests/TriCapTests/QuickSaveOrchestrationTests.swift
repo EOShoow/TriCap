@@ -14,6 +14,25 @@ import Testing
 @Suite("Quick-save orchestration")
 struct QuickSaveOrchestrationTests {
 
+    @Test("Background completion notices wait behind the currently visible capture notice")
+    func completionNoticesAreDeliveredInOrder() {
+        var notices = TransientNoticeQueue<String>()
+
+        // No toast is visible: the first notice can be presented immediately.
+        #expect(notices.enqueue("copied B", presenterIsBusy: false) == "copied B")
+
+        // While B's immediate copy confirmation is visible, older/newer save outcomes queue
+        // instead of replacing it. Their own identity and order must survive.
+        #expect(notices.enqueue("saved A", presenterIsBusy: true) == nil)
+        #expect(notices.enqueue("save B failed", presenterIsBusy: true) == nil)
+        #expect(notices.pendingCount == 2)
+
+        #expect(notices.next() == "saved A")
+        #expect(notices.next() == "save B failed")
+        #expect(notices.next() == nil)
+        #expect(notices.pendingCount == 0)
+    }
+
     @Test("The gate frees and the next capture is accepted while the save is still running")
     func gateFreesBeforeSaveCompletes() async {
         let gate = CaptureSessionGate()

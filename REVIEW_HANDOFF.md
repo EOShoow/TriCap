@@ -123,6 +123,26 @@ full run **511 tests / 72 suites green**; Debug and Release builds with
 screenshots (gate free during save), the deferred save toast timing, and the settings page
 wording in situ — snapshot-verified only.
 
+### Round 12 — Codex follow-up: background-save notices cannot overwrite newer capture state
+
+Independent re-review found one remaining ordering bug after the rework: save payloads were
+correlated correctly, but every completion still called the singleton toast presenter's
+replace-current API. An older save could therefore dismiss a newer capture's immediate
+"Copied" notice, and its failure copy claimed the screenshot was *still* on the clipboard even
+after a later capture had replaced it. `TransientNoticeQueue` now provides a small FIFO policy:
+capture-time notices remain immediate, while background-save completions use
+`ExportToastPresenter.enqueueNotice` and wait behind the notice currently on screen. Completion
+copy is historical and filename-scoped ("Background save for <name> failed. The screenshot was
+copied at capture time."), so it does not assert current pasteboard ownership.
+
+Fresh verification after this follow-up: `QuickSaveOrchestrationTests` **4/4**, including the
+new ordering regression; full run **512 tests / 72 suites green**; independent Debug and Release
+scratch builds with `-Xswiftc -warnings-as-errors` clean; `build-app.sh debug`, strict codesign,
+Info.plist lint, and the no-external-libwebp linkage check pass; all 19 UI snapshots render, with
+both export-toast snapshots visually inspected; `git diff --check` clean. Interactive rapid-fire
+toast timing remains a human feel check, but the replacement race is now structurally prevented
+and covered by the pure queue test.
+
 ## 0.0000000000000 Round 11 — SDK portability fixes and an explicit positioning statement
 
 An external tester on macOS 15.6 could not compile TriCap: Swift 6's concurrency check rejects a

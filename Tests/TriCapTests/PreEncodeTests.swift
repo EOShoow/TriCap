@@ -113,7 +113,7 @@ struct PreEncodeReuseTests {
         #expect(decision.isReuse)
     }
 
-    @Test("A crop always falls back, even when everything else matches")
+    @Test("A crop differs from a full-canvas artifact")
     func croppedFallsBack() {
         // The artifact holds full-canvas frames; reusing it would silently export the
         // uncropped recording. This must beat every match below it.
@@ -123,8 +123,54 @@ struct PreEncodeReuseTests {
             annotationCount: 0, options: AnimatedWebPOptions(),
             cropRect: crop
         )
-        #expect(decision == .cropped(rect: crop))
+        #expect(decision == .cropChanged(preEncoded: nil, requested: crop))
         #expect(!decision.isReuse)
+    }
+
+    @Test("A prepared crop reuses only the same crop")
+    func matchingPreparedCropReuses() {
+        let crop = CGRect(x: 4, y: 4, width: 16, height: 8)
+        let prepared = PreEncodedAnimation(
+            data: Data([1, 2, 3]),
+            canvasSize: CGSize(width: 48, height: 32),
+            options: .default,
+            frameCount: 5,
+            timestampsMs: [0, 100, 200, 300, 400],
+            endTimestampMs: 500,
+            cropRect: crop
+        )
+        #expect(PreEncodeReuse.decide(
+            artifact: prepared, source: source(frameCount: 5), annotationCount: 0,
+            options: .default, cropRect: crop
+        ) == .reuse)
+    }
+
+    @Test("A prepared artifact for one crop is never reused for a different crop")
+    func differingPreparedCropFallsBack() {
+        let preparedCrop = CGRect(x: 4, y: 4, width: 16, height: 8)
+        let requestedCrop = CGRect(x: 8, y: 4, width: 16, height: 8)
+        let prepared = PreEncodedAnimation(
+            data: Data([1, 2, 3]),
+            canvasSize: CGSize(width: 48, height: 32),
+            options: .default,
+            frameCount: 5,
+            timestampsMs: [0, 100, 200, 300, 400],
+            endTimestampMs: 500,
+            cropRect: preparedCrop
+        )
+        let decision = PreEncodeReuse.decide(
+            artifact: prepared, source: source(frameCount: 5), annotationCount: 0,
+            options: .default, cropRect: requestedCrop
+        )
+        #expect(decision == .cropChanged(preEncoded: preparedCrop, requested: requestedCrop))
+        #expect(!decision.isReuse)
+
+        // And a cropped artifact can never stand in for a full-canvas export either.
+        let fullCanvasRequest = PreEncodeReuse.decide(
+            artifact: prepared, source: source(frameCount: 5), annotationCount: 0,
+            options: .default, cropRect: nil
+        )
+        #expect(fullCanvasRequest == .cropChanged(preEncoded: preparedCrop, requested: nil))
     }
 
     @Test("No artifact means no fast path")
@@ -220,7 +266,8 @@ struct PreEncodeReuseTests {
     func reasons() {
         let all: [PreEncodeReuse.Decision] = [
             .reuse, .noArtifact, .frameRangeChanged(preEncoded: 5, requested: 3),
-            .hasAnnotations(count: 2), .canvasChanged(preEncoded: .zero, requested: .zero),
+            .hasAnnotations(count: 2), .cropChanged(preEncoded: nil, requested: .zero),
+            .canvasChanged(preEncoded: .zero, requested: .zero),
             .optionsChanged(field: "quality"), .timelineChanged,
         ]
         for decision in all { #expect(!decision.reason.isEmpty) }

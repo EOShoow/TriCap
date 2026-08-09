@@ -196,6 +196,7 @@ struct EditorView: View {
                     model.trimStart = 0
                     model.trimEnd = model.frameCount - 1
                     model.clampPreviewToTrim()
+                    model.scheduleExportPreparation()
                 }
                 .disabled(!model.isTrimmable || (model.trimStart == 0 && model.trimEnd == model.frameCount - 1))
             }
@@ -218,6 +219,7 @@ struct EditorView: View {
                             model.pauseForTrimEdit()
                             model.trimStart = min(Int(newValue.rounded()), model.trimEnd)
                             model.previewIndex = model.trimStart
+                            model.scheduleExportPreparation()
                         }
                     ),
                     in: model.trimHandleRange
@@ -234,6 +236,7 @@ struct EditorView: View {
                             model.pauseForTrimEdit()
                             model.trimEnd = max(Int(newValue.rounded()), model.trimStart)
                             model.previewIndex = model.trimEnd
+                            model.scheduleExportPreparation()
                         }
                     ),
                     in: model.trimHandleRange

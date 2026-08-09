@@ -114,6 +114,72 @@ public enum ExportService {
 
     // MARK: - Animation
 
+    /// Cancellation for a background preparation encode, checked between frames.
+    ///
+    /// A plain `Task.cancel()` cannot do this job: the encode runs inside `Task.detached` so it
+    /// stays off the main actor, and task cancellation does not propagate into an unstructured
+    /// detached child — polling `Task.isCancelled` in there reads the *detached* task's flag,
+    /// which nobody ever sets. The flag carries the signal by hand instead; the editor flips it
+    /// when the user edits again, presses Save, or closes, and `encodeStreaming` polls it before
+    /// every frame so a runaway preparation can never compete with a real export for the encoder.
+    public final class PreparationCancelFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        public init() {}
+
+        public func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+
+        public var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
+    /// Encode a particular editor state before the user presses Save.
+    ///
+    /// This deliberately accepts no annotations: an annotation is cheap to edit but expensive to
+    /// fingerprint correctly, and a stale overlay is worse than a slow export. The returned
+    /// artifact carries the source canvas, frame timeline and crop; ``PreEncodeReuse`` will only
+    /// allow it through when a later Save requests that exact same job.
+    public static func prepareAnimation(
+        source: AnimationFrameSource,
+        options: AnimatedWebPOptions,
+        cropRect: CGRect?,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) throws -> PreEncodedAnimation {
+        guard source.frameCount > 0 else { throw TriCapError.noFramesCaptured }
+        guard source.timestampsMs.count == source.frameCount else {
+            throw TriCapError.encodingFailed(
+                "Timeline has \(source.timestampsMs.count) timestamps for \(source.frameCount) frames."
+            )
+        }
+        try validateCrop(cropRect, canvasSize: source.canvasSize)
+        let data = try encodeStreaming(
+            source: source,
+            annotations: [],
+            options: options,
+            strategy: .default,
+            progress: nil,
+            cropRect: cropRect,
+            isCancelled: isCancelled
+        )
+        return PreEncodedAnimation(
+            data: data,
+            canvasSize: source.canvasSize,
+            options: options,
+            frameCount: source.frameCount,
+            timestampsMs: source.timestampsMs,
+            endTimestampMs: source.endTimestampMs,
+            cropRect: cropRect
+        )
+    }
+
     public static func exportAnimation(
         source: AnimationFrameSource,
         annotations: [AnnotationItem],
@@ -246,7 +312,8 @@ public enum ExportService {
         options: AnimatedWebPOptions,
         strategy: AnimationEncodeStrategy,
         progress: ((Double) -> Void)?,
-        cropRect: CGRect? = nil
+        cropRect: CGRect? = nil,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
     ) throws -> Data {
         try WebPCodec.encodeAnimationStreaming(
             frameCount: source.frameCount,
@@ -256,6 +323,9 @@ public enum ExportService {
             strategy: strategy,
             progress: progress
         ) { index in
+            guard !isCancelled() else {
+                throw TriCapError.encodingFailed("Animation preparation was cancelled.")
+            }
             let raw = try source.loadFrame(index)
             let composited: CGImage
             if annotations.isEmpty {

@@ -73,6 +73,14 @@ public final class EditorModel: ObservableObject {
     /// annotations, unchanged parameters. `PreEncodeReuse` makes that decision; everything else
     /// goes through the ordinary per-frame render and encode.
     private let preEncoded: PreEncodedAnimation?
+    /// A cropped and/or trimmed variant prepared while the user pauses editing. It is only
+    /// reused after `PreEncodeReuse` proves it still matches the requested export exactly.
+    private var preparedAnimation: PreEncodedAnimation?
+    private var preparationTask: Task<Void, Never>?
+    /// Hand-carried cancellation for the detached encode: cancelling `preparationTask` alone
+    /// never reaches it (unstructured child), so every schedule/invalidate/Save flips this too.
+    private var preparationCancelFlag: ExportService.PreparationCancelFlag?
+    private var preparationGeneration = 0
 
     public init(
         source: EditorSource,
@@ -276,6 +284,7 @@ public final class EditorModel: ObservableObject {
 
     public func add(_ item: AnnotationItem) {
         document.add(item)
+        invalidatePreparedAnimation()
     }
 
     /// Picking a drawing tool leaves crop mode; the two interpret drags differently.
@@ -298,21 +307,107 @@ public final class EditorModel: ObservableObject {
     public func commitCropDrag(from a: CGPoint, to b: CGPoint) {
         guard let rect = CropGeometry.cropRect(dragFrom: a, to: b, canvasSize: canvasSize) else { return }
         cropRect = CropGeometry.effectiveCrop(rect, canvasSize: canvasSize)
+        scheduleExportPreparation()
     }
 
     public func resetCrop() {
         cropRect = nil
+        scheduleExportPreparation()
     }
 
-    public func undo() { document.undo() }
-    public func redo() { document.redo() }
-    public func clearAnnotations() { document.clear() }
+    // Undo/redo re-run the scheduler rather than only invalidating: stepping back to a state
+    // with no annotations is exactly the moment a fresh preparation becomes possible again, and
+    // the scheduler's own guards already handle the annotated case by just invalidating.
+    public func undo() { document.undo(); scheduleExportPreparation() }
+    public func redo() { document.redo(); scheduleExportPreparation() }
+    public func clearAnnotations() { document.clear(); scheduleExportPreparation() }
+
+    /// Prepare the current trim/crop after a short idle delay. A slider drag may emit dozens of
+    /// values, so only the newest settled state is allowed to keep its artifact.
+    public func scheduleExportPreparation() {
+        preparationGeneration &+= 1
+        let generation = preparationGeneration
+        preparationCancelFlag?.cancel()
+        preparationCancelFlag = nil
+        preparationTask?.cancel()
+        preparationTask = nil
+        preparedAnimation = nil
+
+        // While a real export is running, starting a preparation encode would contend with it
+        // for the encoder — the next edit will reschedule once the export is out of the way.
+        guard !isExporting else { return }
+        guard case .clip(let clip) = source, document.items.isEmpty else { return }
+        let range = ClipTrimmer.normalizedRange(first: trimStart, last: trimEnd, count: clip.frames.count) ?? 0...0
+        let crop = CropGeometry.effectiveCrop(cropRect, canvasSize: canvasSize)
+        let isWholeClip = range.lowerBound == 0 && range.upperBound == clip.frames.count - 1
+        // A pristine clip can already reuse the encode produced while recording.
+        guard crop != nil || !isWholeClip else { return }
+        let trimmed = ClipTrimmer.trim(frames: clip.frames, to: range)
+        let trimmedSpan = ClipTrimmer.trimmedDuration(
+            frames: clip.frames, range: range, clipDuration: clip.duration
+        )
+        guard let timeline = ClipTiming.timeline(
+            for: trimmed,
+            nominalFrameInterval: clip.nominalFrameInterval,
+            totalDuration: trimmedSpan
+        ) else { return }
+        let options = settings.animatedWebPOptions
+        let source = AnimationFrameSource(
+            frameCount: trimmed.count,
+            timestampsMs: timeline.timestampsMs,
+            endTimestampMs: timeline.endTimestampMs,
+            canvasSize: canvasSize
+        ) { index in
+            guard let image = trimmed[index].decodedImage() else {
+                throw TriCapError.encodingFailed("Frame \(index) could not be decoded.")
+            }
+            return image
+        }
+
+        let cancelFlag = ExportService.PreparationCancelFlag()
+        preparationCancelFlag = cancelFlag
+        preparationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, !cancelFlag.isCancelled else { return }
+            let artifact = await Task.detached(priority: .utility) {
+                try? ExportService.prepareAnimation(
+                    source: source,
+                    options: options,
+                    cropRect: crop,
+                    isCancelled: { cancelFlag.isCancelled }
+                )
+            }.value
+            guard !Task.isCancelled, !cancelFlag.isCancelled, let self,
+                  self.preparationGeneration == generation else { return }
+            self.preparedAnimation = artifact
+        }
+    }
+
+    private func invalidatePreparedAnimation() {
+        preparationGeneration &+= 1
+        preparationCancelFlag?.cancel()
+        preparationCancelFlag = nil
+        preparationTask?.cancel()
+        preparationTask = nil
+        preparedAnimation = nil
+    }
+
+    private func stopPreparingExport() {
+        preparationGeneration &+= 1
+        preparationCancelFlag?.cancel()
+        preparationCancelFlag = nil
+        preparationTask?.cancel()
+        preparationTask = nil
+    }
 
     // MARK: - Export
 
     public func export() {
         pause()
         guard !isExporting else { return }
+        // Saving before the idle preparation finishes must not make the user wait behind a second
+        // encoder. Keep an already-complete artifact, but stop any stale work between frames.
+        stopPreparingExport()
         isExporting = true
         exportProgress = 0
         errorMessage = nil
@@ -368,7 +463,10 @@ public final class EditorModel: ObservableObject {
             let canvasSize = self.canvasSize
             let options = settings.animatedWebPOptions
             let notice = colorSpaceNotice
-            let artifact = self.preEncoded
+            let isWholeClip = range.lowerBound == 0 && range.upperBound == clip.frames.count - 1
+            let artifact = annotations.isEmpty && crop == nil && isWholeClip
+                ? self.preEncoded
+                : self.preparedAnimation
 
             let source = AnimationFrameSource(
                 frameCount: trimmed.count,
@@ -432,10 +530,13 @@ public final class EditorModel: ObservableObject {
 
     public func close() {
         pause()
+        invalidatePreparedAnimation()
         onClosed()
     }
 
     deinit {
         playbackTask?.cancel()
+        preparationCancelFlag?.cancel()
+        preparationTask?.cancel()
     }
 }

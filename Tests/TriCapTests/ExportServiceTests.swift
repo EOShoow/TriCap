@@ -585,6 +585,77 @@ struct CropExportTests {
         #expect(info.canvasWidth == 96 && info.canvasHeight == 32)
     }
 
+    @Test("A prepared cropped animation is reused only for the identical crop")
+    func reusesPreparedCroppedAnimation() throws {
+        let scratch = try Scratch()
+        let crop = CGRect(x: 16, y: 8, width: 48, height: 32)
+        let original = AnimationExportTests.source(count: 5, size: CGSize(width: 96, height: 64))
+        let artifact = try ExportService.prepareAnimation(
+            source: original, options: .default, cropRect: crop
+        )
+
+        let reused = AnimationFrameSource(
+            frameCount: original.frameCount,
+            timestampsMs: original.timestampsMs,
+            endTimestampMs: original.endTimestampMs,
+            canvasSize: original.canvasSize
+        ) { _ in
+            throw TriCapError.encodingFailed("A matching prepared animation must not reload frames.")
+        }
+
+        let result = try ExportService.exportAnimation(
+            source: reused,
+            annotations: [],
+            options: .default,
+            directory: scratch.root,
+            baseName: "prepared-crop",
+            vaultRoot: nil,
+            linkStyle: .markdown,
+            preEncoded: artifact,
+            cropRect: crop
+        )
+
+        #expect(result.pixelSize == crop.size)
+        #expect(result.submittedFrameCount == original.frameCount)
+    }
+
+    @Test("A cancelled preparation stops between frames instead of encoding the whole clip")
+    func preparationCancelsBetweenFrames() {
+        // The editor cancels through this flag (Task cancellation cannot reach the detached
+        // encode). Flip it while frame 1 is being loaded: frame 2's pre-load check must abort
+        // the encode, so a Save pressed mid-preparation never competes with the real export.
+        let flag = ExportService.PreparationCancelFlag()
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func increment() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+        }
+        let loads = Counter()
+
+        let source = AnimationFrameSource(
+            frameCount: 10,
+            timestampsMs: (0..<10).map { $0 * 100 },
+            endTimestampMs: 1000,
+            canvasSize: CGSize(width: 32, height: 24)
+        ) { index in
+            _ = loads.increment()
+            if index == 1 { flag.cancel() }
+            return WebPTestImages.solid(width: 32, height: 24, red: 0.2, green: 0.4, blue: 0.6)
+        }
+
+        #expect(throws: TriCapError.self) {
+            _ = try ExportService.prepareAnimation(
+                source: source,
+                options: .default,
+                cropRect: nil,
+                isCancelled: { flag.isCancelled }
+            )
+        }
+        #expect(loads.count == 2,
+                "the flag was set during frame 1; frame 2 must never load (loaded \(loads.count) of 10)")
+    }
+
     @Test("An invalid STILL crop is refused before anything is written — no silent rounding")
     func invalidStillCropIsRefused() throws {
         // An independent probe confirmed `CGImage.cropping(to:)` silently rounds and clips:

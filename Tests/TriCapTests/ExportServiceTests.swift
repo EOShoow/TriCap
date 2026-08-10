@@ -619,6 +619,40 @@ struct CropExportTests {
         #expect(result.submittedFrameCount == original.frameCount)
     }
 
+    @Test("A prepared annotated animation reuses the matching immutable annotation snapshot")
+    func reusesPreparedAnnotatedAnimation() throws {
+        let scratch = try Scratch()
+        let annotation = AnnotationItem(
+            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            shape: .rectangle(CGRect(x: 12, y: 10, width: 32, height: 18)),
+            style: AnnotationStyle(color: .red, lineWidth: 3)
+        )
+        let original = AnimationExportTests.source(count: 5, size: CGSize(width: 96, height: 64))
+        let artifact = try ExportService.prepareAnimation(
+            source: original, annotations: [annotation], options: .default, cropRect: nil
+        )
+        let reused = AnimationFrameSource(
+            frameCount: original.frameCount,
+            timestampsMs: original.timestampsMs,
+            endTimestampMs: original.endTimestampMs,
+            canvasSize: original.canvasSize
+        ) { _ in
+            throw TriCapError.encodingFailed("A matching prepared animation must not reload frames.")
+        }
+
+        let result = try ExportService.exportAnimation(
+            source: reused,
+            annotations: [annotation],
+            options: .default,
+            directory: scratch.root,
+            baseName: "prepared-annotation",
+            vaultRoot: nil,
+            linkStyle: .markdown,
+            preEncoded: artifact
+        )
+        #expect(result.submittedFrameCount == original.frameCount)
+    }
+
     @Test("A cancelled preparation stops between frames instead of encoding the whole clip")
     func preparationCancelsBetweenFrames() {
         // The editor cancels through this flag (Task cancellation cannot reach the detached

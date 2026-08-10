@@ -51,6 +51,9 @@ public final class EditorModel: ObservableObject {
 
     @Published public var isExporting = false
     @Published public var exportProgress: Double = 0
+    /// A changed animated export is deliberately gated until its exact artifact is ready.
+    @Published public private(set) var isPreparingExport = false
+    @Published public private(set) var exportPreparationFailed = false
     @Published public var statusMessage: String?
     @Published public var errorMessage: String?
 
@@ -70,10 +73,9 @@ public final class EditorModel: ObservableObject {
     /// The animation encoded while the recording was running, if there is one.
     ///
     /// Only used when the export asks for exactly what it contains — full frame range, no
-    /// annotations, unchanged parameters. `PreEncodeReuse` makes that decision; everything else
-    /// goes through the ordinary per-frame render and encode.
+    /// annotations, no crop, unchanged parameters. `PreEncodeReuse` makes that decision.
     private let preEncoded: PreEncodedAnimation?
-    /// A cropped and/or trimmed variant prepared while the user pauses editing. It is only
+    /// An edited variant prepared while the user pauses editing. It is only
     /// reused after `PreEncodeReuse` proves it still matches the requested export exactly.
     private var preparedAnimation: PreEncodedAnimation?
     private var preparationTask: Task<Void, Never>?
@@ -116,6 +118,13 @@ public final class EditorModel: ObservableObject {
         style.lineWidth = (4 * scale).rounded()
         style.fontSize = (24 * scale).rounded()
         style.mosaicBlockSize = (12 * scale).rounded()
+
+        // The live encoder normally makes a pristine recording immediately saveable. If it was
+        // abandoned or could not finish, prepare the same full-range job here instead of letting
+        // the first Save unexpectedly fall back to a foreground encode.
+        if source.isClip, preEncoded == nil {
+            scheduleExportPreparation()
+        }
     }
 
     private static func truncationNotice(for clip: RecordedClip) -> String? {
@@ -284,7 +293,7 @@ public final class EditorModel: ObservableObject {
 
     public func add(_ item: AnnotationItem) {
         document.add(item)
-        invalidatePreparedAnimation()
+        scheduleExportPreparation()
     }
 
     /// Picking a drawing tool leaves crop mode; the two interpret drags differently.
@@ -316,8 +325,7 @@ public final class EditorModel: ObservableObject {
     }
 
     // Undo/redo re-run the scheduler rather than only invalidating: stepping back to a state
-    // with no annotations is exactly the moment a fresh preparation becomes possible again, and
-    // the scheduler's own guards already handle the annotated case by just invalidating.
+    // with no annotations is exactly the moment a fresh preparation becomes possible again.
     public func undo() { document.undo(); scheduleExportPreparation() }
     public func redo() { document.redo(); scheduleExportPreparation() }
     public func clearAnnotations() { document.clear(); scheduleExportPreparation() }
@@ -332,16 +340,16 @@ public final class EditorModel: ObservableObject {
         preparationTask?.cancel()
         preparationTask = nil
         preparedAnimation = nil
+        isPreparingExport = false
+        exportPreparationFailed = false
 
         // While a real export is running, starting a preparation encode would contend with it
         // for the encoder — the next edit will reschedule once the export is out of the way.
         guard !isExporting else { return }
-        guard case .clip(let clip) = source, document.items.isEmpty else { return }
+        guard case .clip(let clip) = source else { return }
         let range = ClipTrimmer.normalizedRange(first: trimStart, last: trimEnd, count: clip.frames.count) ?? 0...0
         let crop = CropGeometry.effectiveCrop(cropRect, canvasSize: canvasSize)
-        let isWholeClip = range.lowerBound == 0 && range.upperBound == clip.frames.count - 1
-        // A pristine clip can already reuse the encode produced while recording.
-        guard crop != nil || !isWholeClip else { return }
+        let annotations = document.items
         let trimmed = ClipTrimmer.trim(frames: clip.frames, to: range)
         let trimmedSpan = ClipTrimmer.trimmedDuration(
             frames: clip.frames, range: range, clipDuration: clip.duration
@@ -364,22 +372,46 @@ public final class EditorModel: ObservableObject {
             return image
         }
 
+        // A matching live artifact is already ready. Every other state — including an abandoned
+        // live encode or a different edit — stays gated until this exact variant is prepared.
+        if PreEncodeReuse.decide(
+            artifact: preEncoded,
+            source: source,
+            annotations: annotations,
+            options: options,
+            cropRect: crop
+        ).isReuse {
+            return
+        }
+
         let cancelFlag = ExportService.PreparationCancelFlag()
         preparationCancelFlag = cancelFlag
+        isPreparingExport = true
         preparationTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 350_000_000)
             guard !Task.isCancelled, !cancelFlag.isCancelled else { return }
-            let artifact = await Task.detached(priority: .utility) {
-                try? ExportService.prepareAnimation(
+            let result = await Task.detached(priority: .utility) {
+                Result {
+                    try ExportService.prepareAnimation(
                     source: source,
+                    annotations: annotations,
                     options: options,
                     cropRect: crop,
                     isCancelled: { cancelFlag.isCancelled }
-                )
+                    )
+                }
             }.value
             guard !Task.isCancelled, !cancelFlag.isCancelled, let self,
                   self.preparationGeneration == generation else { return }
-            self.preparedAnimation = artifact
+            switch result {
+            case .success(let artifact):
+                self.preparedAnimation = artifact
+                self.isPreparingExport = false
+            case .failure(let error):
+                self.isPreparingExport = false
+                self.exportPreparationFailed = true
+                self.errorMessage = "Couldn’t prepare this animated export: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -390,6 +422,8 @@ public final class EditorModel: ObservableObject {
         preparationTask?.cancel()
         preparationTask = nil
         preparedAnimation = nil
+        isPreparingExport = false
+        exportPreparationFailed = false
     }
 
     private func stopPreparingExport() {
@@ -398,6 +432,7 @@ public final class EditorModel: ObservableObject {
         preparationCancelFlag = nil
         preparationTask?.cancel()
         preparationTask = nil
+        isPreparingExport = false
     }
 
     // MARK: - Export
@@ -405,8 +440,9 @@ public final class EditorModel: ObservableObject {
     public func export() {
         pause()
         guard !isExporting else { return }
-        // Saving before the idle preparation finishes must not make the user wait behind a second
-        // encoder. Keep an already-complete artifact, but stop any stale work between frames.
+        guard !isPreparingExport, !exportPreparationFailed else { return }
+        // The UI only enables Save after preparation, so keep the completed exact artifact and
+        // stop any stale work between frames.
         stopPreparingExport()
         isExporting = true
         exportProgress = 0
@@ -463,10 +499,9 @@ public final class EditorModel: ObservableObject {
             let canvasSize = self.canvasSize
             let options = settings.animatedWebPOptions
             let notice = colorSpaceNotice
-            let isWholeClip = range.lowerBound == 0 && range.upperBound == clip.frames.count - 1
-            let artifact = annotations.isEmpty && crop == nil && isWholeClip
-                ? self.preEncoded
-                : self.preparedAnimation
+            // Either artifact is safe only after the export service compares every invariant,
+            // including the full annotation snapshot. Prefer this editor state's completed job.
+            let artifact = self.preparedAnimation ?? self.preEncoded
 
             let source = AnimationFrameSource(
                 frameCount: trimmed.count,

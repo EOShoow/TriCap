@@ -143,12 +143,11 @@ public enum ExportService {
 
     /// Encode a particular editor state before the user presses Save.
     ///
-    /// This deliberately accepts no annotations: an annotation is cheap to edit but expensive to
-    /// fingerprint correctly, and a stale overlay is worse than a slow export. The returned
-    /// artifact carries the source canvas, frame timeline and crop; ``PreEncodeReuse`` will only
-    /// allow it through when a later Save requests that exact same job.
+    /// The returned artifact carries the source canvas, frame timeline, crop and immutable
+    /// annotation snapshot; ``PreEncodeReuse`` only allows it through for that exact same job.
     public static func prepareAnimation(
         source: AnimationFrameSource,
+        annotations: [AnnotationItem] = [],
         options: AnimatedWebPOptions,
         cropRect: CGRect?,
         isCancelled: @escaping @Sendable () -> Bool = { false }
@@ -162,7 +161,7 @@ public enum ExportService {
         try validateCrop(cropRect, canvasSize: source.canvasSize)
         let data = try encodeStreaming(
             source: source,
-            annotations: [],
+            annotations: annotations,
             options: options,
             strategy: .default,
             progress: nil,
@@ -176,7 +175,8 @@ public enum ExportService {
             frameCount: source.frameCount,
             timestampsMs: source.timestampsMs,
             endTimestampMs: source.endTimestampMs,
-            cropRect: cropRect
+            cropRect: cropRect,
+            annotations: annotations
         )
     }
 
@@ -211,7 +211,7 @@ public enum ExportService {
         let decision = PreEncodeReuse.decide(
             artifact: preEncoded,
             source: source,
-            annotationCount: annotations.count,
+            annotations: annotations,
             options: options,
             cropRect: cropRect
         )

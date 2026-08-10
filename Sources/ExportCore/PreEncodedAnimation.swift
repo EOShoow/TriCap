@@ -1,3 +1,4 @@
+import AnnotationCore
 import CoreGraphics
 import Foundation
 import TriCapKit
@@ -14,6 +15,8 @@ public struct PreEncodedAnimation: Sendable {
     public let canvasSize: CGSize
     /// Crop already baked into `data`. `nil` means full-canvas, as produced while recording.
     public let cropRect: CGRect?
+    /// Annotation overlay already composited into `data`, in drawing order.
+    public let annotations: [AnnotationItem]
     public let options: AnimatedWebPOptions
     /// How many frames went into it.
     public let frameCount: Int
@@ -29,11 +32,13 @@ public struct PreEncodedAnimation: Sendable {
         frameCount: Int,
         timestampsMs: [Int],
         endTimestampMs: Int,
-        cropRect: CGRect? = nil
+        cropRect: CGRect? = nil,
+        annotations: [AnnotationItem] = []
     ) {
         self.data = data
         self.canvasSize = canvasSize
         self.cropRect = cropRect
+        self.annotations = annotations
         self.options = options
         self.frameCount = frameCount
         self.timestampsMs = timestampsMs
@@ -56,6 +61,8 @@ public enum PreEncodeReuse {
         case frameRangeChanged(preEncoded: Int, requested: Int)
         /// Annotations have to be composited onto each frame.
         case hasAnnotations(count: Int)
+        /// The annotation overlay baked into the artifact differs from the requested one.
+        case annotationsChanged(preEncoded: Int, requested: Int)
         /// The requested crop differs from the one already baked into the artifact.
         case cropChanged(preEncoded: CGRect?, requested: CGRect?)
         case canvasChanged(preEncoded: CGSize, requested: CGSize)
@@ -74,6 +81,8 @@ public enum PreEncodeReuse {
             case .frameRangeChanged(let pre, let requested):
                 return "frame range changed (\(pre) pre-encoded, \(requested) requested)"
             case .hasAnnotations(let count): return "\(count) annotation(s) must be composited"
+            case .annotationsChanged(let preEncoded, let requested):
+                return "annotations changed (\(preEncoded) pre-encoded, \(requested) requested)"
             case .cropChanged(let preEncoded, let requested):
                 let describe: (CGRect?) -> String = { rect in
                     guard let rect else { return "full canvas" }
@@ -94,7 +103,7 @@ public enum PreEncodeReuse {
     /// requirement rather than a heuristic:
     ///
     /// - the whole recording, untrimmed (same frame count *and* same timestamps)
-    /// - no annotations, since those are composited per frame
+    /// - the exact annotation stack, since it is composited per frame
     /// - the same crop, since the artifact may already have one baked in
     /// - the same canvas
     /// - the same encoder parameters, all four of them
@@ -102,7 +111,7 @@ public enum PreEncodeReuse {
     public static func decide(
         artifact: PreEncodedAnimation?,
         source: AnimationFrameSource,
-        annotationCount: Int,
+        annotations: [AnnotationItem],
         options: AnimatedWebPOptions,
         cropRect: CGRect? = nil
     ) -> Decision {
@@ -110,7 +119,10 @@ public enum PreEncodeReuse {
         guard artifact.frameCount == source.frameCount else {
             return .frameRangeChanged(preEncoded: artifact.frameCount, requested: source.frameCount)
         }
-        guard annotationCount == 0 else { return .hasAnnotations(count: annotationCount) }
+        guard artifact.annotations == annotations else {
+            if artifact.annotations.isEmpty { return .hasAnnotations(count: annotations.count) }
+            return .annotationsChanged(preEncoded: artifact.annotations.count, requested: annotations.count)
+        }
         guard artifact.canvasSize == source.canvasSize else {
             return .canvasChanged(preEncoded: artifact.canvasSize, requested: source.canvasSize)
         }
@@ -127,5 +139,24 @@ public enum PreEncodeReuse {
         guard artifact.timestampsMs == source.timestampsMs else { return .timelineChanged }
         guard !artifact.data.isEmpty else { return .noArtifact }
         return .reuse
+    }
+
+    /// Compatibility entry point for diagnostics that only know whether annotations exist.
+    /// Export uses the overload above, which compares the full immutable annotation snapshot.
+    public static func decide(
+        artifact: PreEncodedAnimation?,
+        source: AnimationFrameSource,
+        annotationCount: Int,
+        options: AnimatedWebPOptions,
+        cropRect: CGRect? = nil
+    ) -> Decision {
+        guard annotationCount == 0 else { return .hasAnnotations(count: annotationCount) }
+        return decide(
+            artifact: artifact,
+            source: source,
+            annotations: [],
+            options: options,
+            cropRect: cropRect
+        )
     }
 }

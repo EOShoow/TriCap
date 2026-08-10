@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Testing
+@testable import AnnotationCore
 @testable import CaptureCore
 @testable import ExportCore
 @testable import TriCapKit
@@ -143,6 +144,39 @@ struct PreEncodeReuseTests {
             artifact: prepared, source: source(frameCount: 5), annotationCount: 0,
             options: .default, cropRect: crop
         ) == .reuse)
+    }
+
+    @Test("A prepared annotation stack is reused only when every item still matches")
+    func matchingPreparedAnnotationsReuse() {
+        let annotation = AnnotationItem(
+            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            shape: .rectangle(CGRect(x: 4, y: 4, width: 16, height: 8)),
+            style: .default
+        )
+        let prepared = PreEncodedAnimation(
+            data: Data([1, 2, 3]),
+            canvasSize: CGSize(width: 48, height: 32),
+            options: .default,
+            frameCount: 5,
+            timestampsMs: [0, 100, 200, 300, 400],
+            endTimestampMs: 500,
+            annotations: [annotation]
+        )
+
+        #expect(PreEncodeReuse.decide(
+            artifact: prepared, source: source(frameCount: 5), annotations: [annotation],
+            options: .default
+        ) == .reuse)
+
+        let changed = AnnotationItem(
+            id: annotation.id,
+            shape: .rectangle(CGRect(x: 6, y: 4, width: 16, height: 8)),
+            style: .default
+        )
+        #expect(PreEncodeReuse.decide(
+            artifact: prepared, source: source(frameCount: 5), annotations: [changed],
+            options: .default
+        ) == .annotationsChanged(preEncoded: 1, requested: 1))
     }
 
     @Test("A prepared artifact for one crop is never reused for a different crop")

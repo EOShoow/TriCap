@@ -327,6 +327,10 @@ struct EditorView: View {
                 if model.isExporting {
                     ProgressView(value: model.exportProgress)
                         .frame(width: 120)
+                } else if model.isPreparingExport {
+                    ProgressView()
+                        .controlSize(.small)
+                        .help("Preparing the edited animation before saving")
                 }
 
                 if model.savedFileURL != nil {
@@ -336,9 +340,13 @@ struct EditorView: View {
                 Button("Close") { model.close() }
                     .keyboardShortcut(.cancelAction)
 
-                Button(model.isExporting ? "Saving…" : "Save") { model.export() }
+                if model.exportPreparationFailed {
+                    Button("Retry preparation") { model.scheduleExportPreparation() }
+                }
+
+                Button(model.isExporting ? "Saving…" : (model.isPreparingExport ? "Preparing…" : "Save")) { model.export() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(model.isExporting)
+                    .disabled(model.isExporting || model.isPreparingExport || model.exportPreparationFailed)
             }
 
             // Where the file will land, before the user commits to saving.

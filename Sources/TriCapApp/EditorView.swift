@@ -328,8 +328,10 @@ struct EditorView: View {
                     ProgressView(value: model.exportProgress)
                         .frame(width: 120)
                 } else if model.isPreparingExport {
-                    ProgressView()
-                        .controlSize(.small)
+                    // Determinate on purpose: the preparation of a big trim runs ~11 s at the
+                    // measured 1817×1208 sample, and a bare spinner over that long reads as hung.
+                    ProgressView(value: model.preparationProgress)
+                        .frame(width: 120)
                         .help("Preparing the edited animation before saving")
                 }
 

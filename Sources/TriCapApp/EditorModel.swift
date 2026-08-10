@@ -53,6 +53,10 @@ public final class EditorModel: ObservableObject {
     @Published public var exportProgress: Double = 0
     /// A changed animated export is deliberately gated until its exact artifact is ready.
     @Published public private(set) var isPreparingExport = false
+    /// 0...1 across the preparation encode, so a long "Preparing…" visibly moves. At the
+    /// measured 1817×1208 · Q90 · method-4 sample a 117-frame preparation runs ~11 s even in a
+    /// release-grade build — an indeterminate spinner over that reads as "never finishes".
+    @Published public private(set) var preparationProgress: Double = 0
     @Published public private(set) var exportPreparationFailed = false
     @Published public var statusMessage: String?
     @Published public var errorMessage: String?
@@ -341,6 +345,7 @@ public final class EditorModel: ObservableObject {
         preparationTask = nil
         preparedAnimation = nil
         isPreparingExport = false
+        preparationProgress = 0
         exportPreparationFailed = false
 
         // While a real export is running, starting a preparation encode would contend with it
@@ -387,6 +392,13 @@ public final class EditorModel: ObservableObject {
         let cancelFlag = ExportService.PreparationCancelFlag()
         preparationCancelFlag = cancelFlag
         isPreparingExport = true
+        // Per-frame progress from the encode thread; stale generations are dropped on arrival.
+        let reportProgress: @Sendable (Double) -> Void = { [weak self] value in
+            Task { @MainActor [weak self] in
+                guard let self, self.preparationGeneration == generation else { return }
+                self.preparationProgress = value
+            }
+        }
         preparationTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 350_000_000)
             guard !Task.isCancelled, !cancelFlag.isCancelled else { return }
@@ -397,7 +409,8 @@ public final class EditorModel: ObservableObject {
                     annotations: annotations,
                     options: options,
                     cropRect: crop,
-                    isCancelled: { cancelFlag.isCancelled }
+                    isCancelled: { cancelFlag.isCancelled },
+                    progress: reportProgress
                     )
                 }
             }.value
@@ -423,6 +436,7 @@ public final class EditorModel: ObservableObject {
         preparationTask = nil
         preparedAnimation = nil
         isPreparingExport = false
+        preparationProgress = 0
         exportPreparationFailed = false
     }
 

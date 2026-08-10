@@ -653,6 +653,31 @@ struct CropExportTests {
         #expect(result.submittedFrameCount == original.frameCount)
     }
 
+    @Test("Preparation reports monotonic per-frame progress ending at 1")
+    func preparationReportsProgress() throws {
+        // The Preparing badge is determinate now; a preparation that reported nothing, went
+        // backwards, or never reached 1 would freeze or lie to it.
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var stored: [Double] = []
+            func append(_ value: Double) { lock.lock(); stored.append(value); lock.unlock() }
+            var values: [Double] { lock.lock(); defer { lock.unlock() }; return stored }
+        }
+        let box = Box()
+
+        _ = try ExportService.prepareAnimation(
+            source: AnimationExportTests.source(count: 4),
+            options: .default,
+            cropRect: nil,
+            progress: { box.append($0) }
+        )
+
+        let values = box.values
+        #expect(values.count == 4, "one report per frame, got \(values)")
+        #expect(values == values.sorted(), "progress must never go backwards: \(values)")
+        #expect(values.last == 1.0, "the final frame must report completion: \(values)")
+    }
+
     @Test("A cancelled preparation stops between frames instead of encoding the whole clip")
     func preparationCancelsBetweenFrames() {
         // The editor cancels through this flag (Task cancellation cannot reach the detached

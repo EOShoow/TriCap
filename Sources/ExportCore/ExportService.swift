@@ -150,7 +150,8 @@ public enum ExportService {
         annotations: [AnnotationItem] = [],
         options: AnimatedWebPOptions,
         cropRect: CGRect?,
-        isCancelled: @escaping @Sendable () -> Bool = { false }
+        isCancelled: @escaping @Sendable () -> Bool = { false },
+        progress: ((Double) -> Void)? = nil
     ) throws -> PreEncodedAnimation {
         guard source.frameCount > 0 else { throw TriCapError.noFramesCaptured }
         guard source.timestampsMs.count == source.frameCount else {
@@ -164,7 +165,7 @@ public enum ExportService {
             annotations: annotations,
             options: options,
             strategy: .default,
-            progress: nil,
+            progress: progress,
             cropRect: cropRect,
             isCancelled: isCancelled
         )

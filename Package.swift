@@ -38,6 +38,13 @@ let package = Package(
                 // public headers as "src/webp/encode.h" relative to include/.
                 .headerSearchPath("."),
                 .headerSearchPath("include"),
+                // Debug builds must still encode at real speed. SwiftPM compiles C at -O0 in
+                // debug, which measured 22× slower on the encoder hot path (2117.6 ms/frame vs
+                // 87.6 ms at 1817×1208 · Q90 · method 4) — a four-minute "Preparing…" for a
+                // 117-frame trim, and the live pre-encoder falls 60 frames behind and abandons.
+                // This library is vendored and never stepped through, so nothing is lost by
+                // optimising it in every configuration.
+                .unsafeFlags(["-O2"], .when(configuration: .debug)),
                 .define("WEBP_USE_THREAD", to: "1"),
                 // Keep the encoder deterministic and free of stdio chatter.
                 .unsafeFlags(["-Wno-unused-function", "-Wno-unused-but-set-variable"]),

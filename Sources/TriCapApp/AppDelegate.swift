@@ -471,13 +471,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard await ensurePermission() else { return }
 
-            // Snapshot the window list before the overlay covers everything, so a single click
-            // can capture the window the pointer is over.
-            let windows = await WindowSurvey.currentWindows()
+            // Snapshot the window list *and* the screen pixels before the overlay covers
+            // everything: a click can then capture the window under the pointer, or the rectangle
+            // the content itself makes obvious — the image canvas inside a viewer, a document
+            // page. Sampling after the overlay appeared would detect TriCap's own dimming layer.
+            //
+            // The two reads are concurrent because each is a ScreenCaptureKit round trip and
+            // doing them in series is time the user spends staring at an un-dimmed screen.
+            let displays = DisplaySurvey.currentDisplays()
+            async let windowList = WindowSurvey.currentWindows()
+            async let pixelFields = ScreenPixelSurvey.currentFields(displays: displays)
+            let (windows, fields) = await (windowList, pixelFields)
 
             let selector = RegionSelector()
             self.selector = selector
-            let outcome = await selector.selectRegion(initialMode: mode, windowCandidates: windows)
+            // Detection itself is deliberately *not* awaited here: it runs while the overlay is
+            // already up and taking mouse events, and its results are adopted when they land.
+            let outcome = await selector.selectRegion(
+                initialMode: mode,
+                windowCandidates: windows,
+                visualRegions: { await ScreenPixelSurvey.detectedRegions(in: fields) }
+            )
             self.selector = nil
 
             switch outcome {

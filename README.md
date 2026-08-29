@@ -72,6 +72,11 @@ That produces `build/debug/TriCap.app`. For an optimised build:
 ./scripts/build-app.sh release
 ```
 
+`build-app.sh debug` keeps the Debug configuration and diagnostics, while compiling the executable
+with Swift optimisation. This matters for the pixel-based content picker: an unoptimised Swift
+build makes its full-screen scan visibly slow. Use plain `swift build -c debug` when stepping
+through the code in a debugger; use the script when testing the app's interaction speed.
+
 Then launch it:
 
 ```bash
@@ -124,6 +129,13 @@ single-frame clip), both selection-overlay modes, the recording HUD and countdow
 confirmation, and the status-item icon offscreen to PNG. Useful for eyeballing the interface
 without a screen-recording tool.
 
+Two of them double as a regression check on visual-region detection:
+`20-selection-visual-region.png` puts the real overlay over a synthetic desktop and highlights
+whatever the detector actually found in it, and `21-visual-region-detection.png` draws every
+candidate over four fixtures with its confidence. Neither rectangle is a number typed into the
+renderer, so if detection regresses the images change — or the render fails outright, because
+finding nothing is an error there.
+
 ---
 
 ## Permission
@@ -148,9 +160,16 @@ identity to avoid that. This repository does not sign, notarize or publish.
 ## Using it
 
 1. Press `⌥⇧5` (or pick **Capture Region…** / **Record Region…** from the menu).
-2. Click a highlighted window, or drag out a region. The readout shows the exact pixel size.
+2. Click a highlighted window or content rectangle, or drag out a region. The readout shows the exact pixel size.
    Hold `Option` while dragging to ignore snapping. `R`/`S` toggle screenshot vs recording;
    `Esc` cancels.
+
+   TriCap also highlights rectangles the window list cannot name — the image canvas inside a
+   viewer, a document page, a panel — by reading the edges out of the screen content. The badge
+   says **click to capture content** when that is what is on offer, and those edges join the ones
+   a drag snaps to. Visual content rectangles keep a 3-source-pixel inward guard so an
+   anti-aliased, dark or coloured rim stays outside the capture. When nothing is confident enough,
+   you get the window, exactly as before.
 3. A screenshot is **on your clipboard** — paste it. To annotate instead, use **Screenshot and
    Edit…** from the menu, or switch the default in Settings → General.
 4. For a recording: the countdown runs, then record. Click **Stop** to finish, or press `Esc` —

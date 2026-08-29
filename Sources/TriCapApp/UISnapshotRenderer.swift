@@ -160,6 +160,17 @@ enum UISnapshotRenderer {
             windowHighlightSnapshot(),
             to: directory.appendingPathComponent("14-selection-window-highlight.png")
         )
+        // The visual-region feature, end to end: the highlight rectangle in these two is not a
+        // number typed into this file, it is whatever `VisualRegionDetector` found in the bitmap
+        // beside it. If detection regresses, these images change or the render fails outright.
+        try write(
+            visualRegionHighlightSnapshot(),
+            to: directory.appendingPathComponent("20-selection-visual-region.png")
+        )
+        try write(
+            visualRegionEvidenceSheet(),
+            to: directory.appendingPathComponent("21-visual-region-detection.png")
+        )
         // The two overlaps that used to erase the mode banner: a full-screen window highlight and
         // a manual selection dragged straight through the banner. Both `.copy`-blend over it; the
         // banner must be repainted on top.
@@ -328,6 +339,203 @@ enum UISnapshotRenderer {
 
         settle(container)
         return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
+    }
+
+    // MARK: - Visual regions
+
+    /// The case the feature exists for: a white image canvas inside a dark viewer window.
+    ///
+    /// Also carries the things that must *not* be detected — rows of body text, a hairline table
+    /// rule, a sidebar — so the picture shows both halves of the claim.
+    private static func visualRegionDesktop(width: Int, height: Int) -> CGImage {
+        let ctx = ImageProcessing.makeContext(width: width, height: height)!
+
+        func fill(_ rect: CGRect, _ grey: CGFloat) {
+            ctx.setFillColor(CGColor(srgbRed: grey, green: grey, blue: grey, alpha: 1))
+            ctx.fill(rect)
+        }
+
+        fill(CGRect(x: 0, y: 0, width: width, height: height), 0.12)          // desktop
+        fill(CGRect(x: 90, y: 70, width: 720, height: 430), 0.19)             // viewer window
+        fill(CGRect(x: 90, y: 464, width: 720, height: 36), 0.24)             // its title bar
+        fill(CGRect(x: 90, y: 70, width: 150, height: 394), 0.16)             // its sidebar
+
+        // The canvas. Deliberately off-white rather than pure white: nothing in the detector
+        // tests for white, and the snapshot should not imply otherwise.
+        let canvas = CGRect(x: 280, y: 120, width: 480, height: 310)
+        fill(canvas, 0.95)
+
+        // A photograph on the canvas, with a margin — the ordinary shape of an image viewer.
+        if let gradient = CGGradient(
+            colorsSpace: ImageProcessing.outputColorSpace,
+            colors: [
+                CGColor(srgbRed: 0.24, green: 0.42, blue: 0.62, alpha: 1),
+                CGColor(srgbRed: 0.86, green: 0.52, blue: 0.28, alpha: 1),
+            ] as CFArray,
+            locations: [0, 1]
+        ) {
+            let photo = canvas.insetBy(dx: 34, dy: 30)
+            ctx.saveGState()
+            ctx.clip(to: photo)
+            ctx.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: photo.minX, y: photo.maxY),
+                end: CGPoint(x: photo.maxX, y: photo.minY),
+                options: []
+            )
+            ctx.restoreGState()
+        }
+
+        // Sidebar text: rows two pixels tall. These are the features a gradient-based edge
+        // finder would happily turn into rectangles.
+        ctx.setFillColor(CGColor(srgbRed: 0.62, green: 0.64, blue: 0.68, alpha: 1))
+        for row in stride(from: 100, to: 440, by: 22) {
+            ctx.fill(CGRect(x: 108, y: row, width: 96, height: 2))
+        }
+        // A hairline rule between the sidebar and the canvas area.
+        ctx.setFillColor(CGColor(srgbRed: 0.30, green: 0.30, blue: 0.32, alpha: 1))
+        ctx.fill(CGRect(x: 240, y: 70, width: 1, height: 394))
+
+        return ctx.makeImage()!
+    }
+
+    /// Run the detector over a rendered bitmap and hand back its best rectangle, in the bitmap's
+    /// own (bottom-left origin) drawing coordinates.
+    ///
+    /// `PixelField` is top-left origin like every bitmap; Core Graphics drawing is bottom-left.
+    /// The flip goes through `CoordinateConverter` rather than being open-coded, because that is
+    /// the rule everywhere else in this app and a snapshot that flipped it by hand would be
+    /// evidence of nothing.
+    private static func detectedRegions(in image: CGImage) throws -> [(rect: CGRect, confidence: Double)] {
+        guard let rgbx = ImageProcessing.rgbxBytes(image),
+              let field = PixelField(width: rgbx.width, height: rgbx.height, bytes: rgbx.bytes)
+        else { throw TriCapError.encodingFailed("could not read the fixture bitmap") }
+
+        let found = VisualRegionDetector.detect(in: field)
+        guard !found.isEmpty else {
+            throw TriCapError.encodingFailed("visual region detection found nothing in the fixture")
+        }
+        return found.map { candidate in
+            (
+                CoordinateConverter.appKitRect(
+                    fromQuartzRect: candidate.rect, primaryHeightInPoints: CGFloat(image.height)
+                ),
+                candidate.confidence
+            )
+        }
+    }
+
+    /// The single rectangle a click would take — the most confident one.
+    private static func detectedRegion(in image: CGImage) throws -> (rect: CGRect, confidence: Double) {
+        try detectedRegions(in: image)[0]
+    }
+
+    /// The real overlay, highlighting the rectangle the real detector found.
+    private static func visualRegionHighlightSnapshot() throws -> NSBitmapImageRep {
+        let size = CGSize(width: 900, height: 560)
+        let container = offscreenContainer(size: size)
+        let desktop = visualRegionDesktop(width: Int(size.width), height: Int(size.height))
+        let detected = try detectedRegion(in: desktop)
+
+        let overlay = SelectionOverlayView(frame: container.bounds)
+        overlay.mode = .quickStill
+        container.addSubview(overlay)
+
+        // Same global-point convention as the other overlay snapshots: the view interprets its
+        // rectangles in AppKit global points and converts through its (off-screen) window.
+        let windowOrigin = container.window?.frame.origin ?? .zero
+        overlay.highlightedWindow = detected.rect.offsetBy(dx: windowOrigin.x, dy: windowOrigin.y)
+        overlay.highlightedWindowPixelSize = CGSize(
+            width: detected.rect.width * 2, height: detected.rect.height * 2
+        )
+        overlay.highlightIsVisualRegion = true
+
+        settle(container)
+        return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
+    }
+
+    /// Detector output over a row of fixtures: what was found, where, and how sure.
+    ///
+    /// The point of drawing this rather than asserting it is that the failure modes worth
+    /// worrying about are *positional* — an edge a few pixels off, a rectangle assembled from a
+    /// line of text — and those are obvious in a picture and invisible in a pass/fail.
+    private static func visualRegionEvidenceSheet() throws -> NSBitmapImageRep {
+        let tile = CGSize(width: 300, height: 210)
+        let pad = 16
+        let captionHeight = 26
+
+        // Each fixture is a background level, a region level, and a decoration that must not be
+        // mistaken for structure.
+        let fixtures: [(title: String, background: CGFloat, region: CGFloat, stripes: Bool, nested: Bool)] = [
+            ("white on dark", 0.14, 0.97, false, false),
+            ("off-white on light", 0.85, 0.93, false, false),
+            ("text rows inside", 0.14, 0.97, true, false),
+            ("nested panel", 0.14, 0.97, false, true),
+        ]
+
+        let sheetWidth = Int(tile.width) * fixtures.count + pad * (fixtures.count + 1)
+        let sheetHeight = Int(tile.height) + pad * 2 + captionHeight
+        let sheet = ImageProcessing.makeContext(width: sheetWidth, height: sheetHeight)!
+        sheet.setFillColor(CGColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1))
+        sheet.fill(CGRect(x: 0, y: 0, width: sheetWidth, height: sheetHeight))
+
+        // `NSString.draw` renders through AppKit, which needs a current graphics context; a bare
+        // `CGContext` is not one, and without this the captions come out blank.
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: sheet, flipped: false)
+        defer { NSGraphicsContext.current = previousContext }
+
+        for (index, fixture) in fixtures.enumerated() {
+            let ctx = ImageProcessing.makeContext(width: Int(tile.width), height: Int(tile.height))!
+            func fill(_ rect: CGRect, _ grey: CGFloat) {
+                ctx.setFillColor(CGColor(srgbRed: grey, green: grey, blue: grey, alpha: 1))
+                ctx.fill(rect)
+            }
+            fill(CGRect(origin: .zero, size: tile), fixture.background)
+            let region = CGRect(x: 56, y: 40, width: 190, height: 132)
+            fill(region, fixture.region)
+            if fixture.stripes {
+                for row in stride(from: 56, to: 160, by: 8) {
+                    fill(CGRect(x: 72, y: row, width: 150, height: 2), 0.18)
+                }
+            }
+            if fixture.nested {
+                fill(region.insetBy(dx: 44, dy: 34), 0.55)
+            }
+            let fixtureImage = ctx.makeImage()!
+            let detected = try detectedRegions(in: fixtureImage)
+
+            let origin = CGPoint(x: pad + index * (Int(tile.width) + pad), y: pad + captionHeight)
+            sheet.draw(fixtureImage, in: CGRect(origin: origin, size: tile))
+
+            // Every candidate, so nesting is visible rather than implied: the most confident one
+            // solid, the rest thinner. A click takes whichever one the pointer is inside and
+            // smallest — that rule lives in `VisualRegionPicker`, not here.
+            for (rank, candidate) in detected.enumerated().reversed() {
+                let strongest = rank == 0
+                sheet.setStrokeColor(CGColor(
+                    srgbRed: 0.20, green: 0.90, blue: 0.45, alpha: strongest ? 1 : 0.55
+                ))
+                sheet.setLineWidth(strongest ? 2 : 1)
+                sheet.stroke(candidate.rect.offsetBy(dx: origin.x, dy: origin.y))
+            }
+
+            let caption = detected.count == 1
+                ? String(format: "%@ — conf %.2f", fixture.title, detected[0].confidence)
+                : String(format: "%@ — %d regions, best %.2f", fixture.title, detected.count, detected[0].confidence)
+            (caption as NSString).draw(
+                at: CGPoint(x: origin.x, y: CGFloat(pad) / 2),
+                withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.white,
+                ]
+            )
+        }
+
+        guard let image = sheet.makeImage() else {
+            throw TriCapError.encodingFailed("evidence sheet composite failed")
+        }
+        return NSBitmapImageRep(cgImage: image)
     }
 
     /// A scale drawing of where the chrome ends up for a near-full-screen selection.

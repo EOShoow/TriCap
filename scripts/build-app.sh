@@ -29,10 +29,23 @@ esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> swift build -c $CONFIGURATION"
-swift build -c "$CONFIGURATION"
+BUILD_ARGS=(-c "$CONFIGURATION")
 
-BIN_PATH="$(swift build -c "$CONFIGURATION" --show-bin-path)"
+# The Debug bundle is the everyday local build documented in the README.  Visual-region picking
+# does a large, CPU-bound pixel survey while the user is waiting for the highlight to appear;
+# compiling that path at Swift's default `-Onone` turns a tens-of-milliseconds release operation
+# into a visible multi-second pause.  Keep the Debug configuration (including `DEBUG`) for local
+# behaviour and diagnostics, but optimize the executable code that the user actually launches.
+# `swift test` intentionally remains a normal debug build so test failures retain their usual
+# debugger-friendly shape.
+if [[ "$CONFIGURATION" == "debug" ]]; then
+  BUILD_ARGS+=(-Xswiftc -O)
+fi
+
+echo "==> swift build ${BUILD_ARGS[*]}"
+swift build "${BUILD_ARGS[@]}"
+
+BIN_PATH="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 EXECUTABLE="$BIN_PATH/TriCap"
 [[ -x "$EXECUTABLE" ]] || { echo "!! executable not found at $EXECUTABLE" >&2; exit 1; }
 

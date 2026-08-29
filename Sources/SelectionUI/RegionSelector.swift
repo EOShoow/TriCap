@@ -1,6 +1,17 @@
 import AppKit
 import TriCapKit
 
+/// Geometry passed to `NSWindow.init(contentRect:styleMask:backing:defer:screen:)`.
+///
+/// When an explicit `screen` is supplied, AppKit interprets `contentRect.origin` relative to that
+/// screen. Passing `NSScreen.frame` here therefore applies a secondary display's non-zero origin
+/// twice. The primary display hid the bug because its origin is `(0, 0)`.
+enum SelectionOverlayPlacement {
+    static func contentRect(forScreenFrame frame: CGRect) -> CGRect {
+        CGRect(origin: .zero, size: frame.size)
+    }
+}
+
 /// Drives the full-screen region picker.
 ///
 /// One overlay window is created per display and they cooperate: whichever view receives the
@@ -35,7 +46,15 @@ public final class RegionSelector {
     ///
     /// Already filtered by `WindowPicker.isSelectable` — see ``snapEdges``.
     private var candidates: [WindowCandidate] = []
-    private var highlighted: WindowCandidate?
+
+    /// Rectangles read off the screen pixels, which arrive *after* the overlay is already up.
+    ///
+    /// Detection costs tens of milliseconds and must not delay the crosshair, so the overlay opens
+    /// with window highlighting working and these land a moment later. Everything that consumes
+    /// them — the highlight, the readout, the click, the snap set — is refreshed at that point, so
+    /// there is no state in which one of them knows about a rectangle and another does not.
+    private var visualRegions: [VisualRegionCandidate] = []
+    private var highlighted: SelectionTarget?
     /// Edges the drag snaps to: the **same** filtered windows as ``candidates``, plus every
     /// display.
     ///
@@ -50,12 +69,18 @@ public final class RegionSelector {
     public init() {}
 
     /// Present the picker and wait for the user to choose a region or cancel.
-    /// - Parameter windowCandidates: selectable windows, front to back. Empty disables
-    ///   click-to-capture-window and leaves only free-form dragging, which is the correct
-    ///   degradation when the window list cannot be read.
+    /// - Parameters:
+    ///   - windowCandidates: selectable windows, front to back. Empty disables
+    ///     click-to-capture-window and leaves only free-form dragging, which is the correct
+    ///     degradation when the window list cannot be read.
+    ///   - visualRegions: supplies rectangles detected in the screen pixels. Called once, off the
+    ///     main actor, while the overlay is already up; it may take as long as it needs and may
+    ///     return nothing. Defaults to nothing, which is exactly the behaviour that existed
+    ///     before visual regions.
     public func selectRegion(
         initialMode: CaptureFlow,
-        windowCandidates: [WindowCandidate] = []
+        windowCandidates: [WindowCandidate] = [],
+        visualRegions: (@Sendable () async -> [VisualRegionCandidate])? = nil
     ) async -> Outcome {
         let displays = DisplaySurvey.currentDisplays()
         guard !displays.isEmpty else { return .cancelled }
@@ -67,11 +92,8 @@ public final class RegionSelector {
         self.candidates = WindowPicker.selectableWindows(
             in: windowCandidates, ownBundleIdentifier: ownBundle
         )
-        self.snapEdges = WindowPicker.snapEdges(
-            in: windowCandidates,
-            displayBounds: displays.map(\.appKitBounds),
-            ownBundleIdentifier: ownBundle
-        )
+        self.visualRegions = []
+        rebuildSnapEdges()
 
         // Remember who was in front so a cancelled capture puts focus back where it was.
         previouslyActiveApp = NSWorkspace.shared.frontmostApplication
@@ -79,7 +101,40 @@ public final class RegionSelector {
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
             presentOverlays()
+
+            guard let detectRegions = visualRegions else { return }
+            Task { @MainActor [weak self] in
+                let detected = await detectRegions()
+                self?.install(visualRegions: detected)
+            }
         }
+    }
+
+    /// Adopt the detected rectangles once they arrive.
+    ///
+    /// Ignored if the overlay has already closed — a detection finishing after the user has
+    /// clicked must not resurrect a highlight or mutate a finished selection.
+    private func install(visualRegions detected: [VisualRegionCandidate]) {
+        guard continuation != nil, !detected.isEmpty else { return }
+        visualRegions = detected
+        rebuildSnapEdges()
+
+        // The pointer has not moved, so nothing would otherwise re-run hit-testing; without this
+        // the user has to jiggle the mouse before the feature appears to exist.
+        if anchor == nil {
+            updateHighlight(at: NSEvent.mouseLocation)
+        }
+    }
+
+    /// Snap targets: windows, displays and confident visual rectangles — the same filtered set
+    /// that can be hovered and clicked. Rebuilt whenever that set changes.
+    private func rebuildSnapEdges() {
+        snapEdges = VisualRegionPicker.snapEdges(
+            windows: candidates,
+            displayBounds: displays.map(\.appKitBounds),
+            visualRegions: visualRegions,
+            ownBundleIdentifier: Bundle.main.bundleIdentifier
+        )
     }
 
     // MARK: - Overlay lifecycle
@@ -87,7 +142,7 @@ public final class RegionSelector {
     private func presentOverlays() {
         for screen in NSScreen.screens {
             let window = SelectionOverlayWindow(
-                contentRect: screen.frame,
+                contentRect: SelectionOverlayPlacement.contentRect(forScreenFrame: screen.frame),
                 styleMask: .borderless,
                 backing: .buffered,
                 defer: false,
@@ -207,12 +262,13 @@ extension RegionSelector: SelectionOverlayDelegate {
         self.anchor = nil
         self.gesture = nil
 
-        // A click on a highlighted window captures that window.
-        if isClick, let window = highlighted,
-           let display = DisplaySurvey.displayWithLargestOverlap(of: window.frame, in: displays),
-           let region = CaptureRegion(appKitGlobalRect: window.frame, display: display) {
+        // A click captures whatever is highlighted — the very rectangle the user was looking at,
+        // whether the window server named it or the pixels did.
+        if isClick, let target = highlighted,
+           let display = DisplaySurvey.displayWithLargestOverlap(of: target.frame, in: displays),
+           let region = CaptureRegion(appKitGlobalRect: target.frame, display: display) {
             TriCapLog.selection.info(
-                "captured window \(window.id, privacy: .public) \(Int(region.displayPixelRect.width), privacy: .public)x\(Int(region.displayPixelRect.height), privacy: .public)px"
+                "captured \(target.identity, privacy: .public) \(Int(region.displayPixelRect.width), privacy: .public)x\(Int(region.displayPixelRect.height), privacy: .public)px"
             )
             finish(.selected(region, mode))
             return
@@ -255,18 +311,20 @@ extension RegionSelector: SelectionOverlayDelegate {
 
     private func updateHighlight(at point: CGPoint) {
         let window = WindowPicker.window(at: point, in: candidates, ownBundleIdentifier: Bundle.main.bundleIdentifier)
-        guard window?.id != highlighted?.id else { return }
-        highlighted = window
+        let target = VisualRegionPicker.target(at: point, window: window, visualRegions: visualRegions)
+        guard target?.identity != highlighted?.identity else { return }
+        highlighted = target
 
         var pixelSize: CGSize?
-        if let window,
-           let display = DisplaySurvey.displayWithLargestOverlap(of: window.frame, in: displays),
-           let region = CaptureRegion(appKitGlobalRect: window.frame, display: display) {
+        if let frame = target?.frame,
+           let display = DisplaySurvey.displayWithLargestOverlap(of: frame, in: displays),
+           let region = CaptureRegion(appKitGlobalRect: frame, display: display) {
             pixelSize = region.nativePixelSize
         }
         for view in views {
-            view.highlightedWindow = window?.frame
+            view.highlightedWindow = target?.frame
             view.highlightedWindowPixelSize = pixelSize
+            view.highlightIsVisualRegion = target?.isVisualRegion ?? false
         }
     }
 
@@ -276,6 +334,7 @@ extension RegionSelector: SelectionOverlayDelegate {
         for view in views {
             view.highlightedWindow = nil
             view.highlightedWindowPixelSize = nil
+            view.highlightIsVisualRegion = false
         }
     }
 }

@@ -39,8 +39,9 @@ public final class SelectionOverlayView: NSView {
         didSet { if oldValue != mode { needsDisplay = true } }
     }
 
-    /// The window under the pointer, in AppKit global points. Drawn as a highlight while the user
-    /// has not started dragging: one click captures it.
+    /// What is under the pointer, in AppKit global points — a window, or a rectangle read off the
+    /// screen content. Drawn as a highlight while the user has not started dragging: one click
+    /// captures exactly this rectangle.
     public var highlightedWindow: CGRect? {
         didSet { if oldValue != highlightedWindow { needsDisplay = true } }
     }
@@ -48,6 +49,15 @@ public final class SelectionOverlayView: NSView {
     /// Pixel size of ``highlightedWindow``, for its readout.
     public var highlightedWindowPixelSize: CGSize? {
         didSet { if oldValue != highlightedWindowPixelSize { needsDisplay = true } }
+    }
+
+    /// Whether the highlight came from the window list or from the pixels.
+    ///
+    /// The only thing this changes is the badge wording. The user is being offered a rectangle
+    /// the window server never mentioned, and saying so is the difference between "this app is
+    /// clever" and "this app highlighted something odd".
+    public var highlightIsVisualRegion: Bool = false {
+        didSet { if oldValue != highlightIsVisualRegion { needsDisplay = true } }
     }
 
     public override init(frame frameRect: NSRect) { super.init(frame: frameRect) }
@@ -123,8 +133,9 @@ public final class SelectionOverlayView: NSView {
         drawCorners(of: local, in: context)
 
         if let pixelSize = highlightedWindowPixelSize {
+            let what = highlightIsVisualRegion ? "content" : "window"
             drawBadge(
-                "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px  ·  click to capture",
+                "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px  ·  click to capture \(what)",
                 near: local,
                 in: context
             )

@@ -40,8 +40,8 @@ CaptureCore  SelectionUI  AnnotationCore  →  ExportCore
 | Target | Responsibility |
 |---|---|
 | `CWebP` | Vendored libwebp: dec, demux, dsp, enc, mux, utils, sharpyuv. One hand-written module map exposing only the public headers TriCap uses. |
-| `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging — plus the pure logic behind window-aware selection (`WindowPicker`, `SelectionGesture`, `SnapEngine`), pinning (`PinLimits`, `PinPlacement`, `PinZoom`, `PinOpacity`, `PinFocusOrder`, `PriorityHotKeyClaim`), chrome placement (`HUDPlacement`) and animation timing (`IncrementalTimeline`, `AnimationEncodeStrategy`). |
-| `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, the `RecordingSession` lifecycle and its `CaptureSessionGate`, `WindowSurvey`, clip trimming and WebP timeline construction. |
+| `TriCapKit` | The shared vocabulary: `CoordinateConverter`, `DisplayGeometry`, `CaptureRegion`, `RecordingLimits`, `AnimatedWebPOptions`, `AppSettings`, `HotKeyCombo`, `TriCapError`, `ImageProcessing`, `DisplaySurvey`, logging — plus the pure logic behind window-aware selection (`WindowPicker`, `SelectionGesture`, `SnapEngine`), content-aware selection (`PixelField`, `VisualRegionDetector`, `VisualRegionMapping`, `VisualRegionPicker`), pinning (`PinLimits`, `PinPlacement`, `PinZoom`, `PinOpacity`, `PinFocusOrder`, `PriorityHotKeyClaim`), chrome placement (`HUDPlacement`) and animation timing (`IncrementalTimeline`, `AnimationEncodeStrategy`). |
+| `CaptureCore` | Permission state, ScreenCaptureKit configuration, `StillCaptureService`, `RegionRecorder`, the bounded `FrameBuffer`, the `RecordingSession` lifecycle and its `CaptureSessionGate`, `WindowSurvey`, `ScreenPixelSurvey`, clip trimming and WebP timeline construction. |
 | `SelectionUI` | The cross-display selection overlay: one borderless shielding-level window per screen, one shared global selection rect, window highlighting under the pointer, `R`/`S` mode switching, `Esc`/right-click cancel. |
 | `AnnotationCore` | Annotation model (`AnnotationItem`, `AnnotationShape`, `AnnotationStyle`), the snapshot-based `AnnotationDocument` with bounded undo/redo, and `AnnotationRenderer`. |
 | `ExportCore` | `WebPCodec` (the libwebp bridge), `WebPAnimEncoderSession` + `LivePreEncoder` (encode-while-recording), `PreEncodeReuse`, `StillImageCodec` + `MagicBytes`, `OutputFileWriter`, `MarkdownReference`, `PasteboardImage`, and `ExportService` which renders → encodes → writes → **re-reads and verifies**. |
@@ -505,6 +505,66 @@ threshold), and `SnapEngine` (8 pt edge snapping, disabled by holding Option). `
 each axis independently: a short selection near a display edge can have both of its horizontal
 sides inside the threshold of the same line, and collapsing that axis must not also cancel a
 perfectly good snap on the other one.
+
+## Visual regions: selecting what the window server cannot name
+
+The window list stops at window frames. A user pointing at "that picture" is pointing at a
+rectangle *inside* a window — an image canvas in a viewer, a document page, a panel — and no
+public API will name it. `VisualRegionDetector` reads it off the screen content instead:
+hovering highlights it, one click captures exactly it, and its four sides join the snap set.
+
+**The pixels are sampled before the overlay appears.** `ScreenPixelSurvey.currentFields` takes one
+ScreenCaptureKit screenshot per display, concurrently with the window survey, while the screen
+still shows only the user's content. Sampling afterwards would detect TriCap's own dimming layer,
+mode banner and highlight box and offer them back as things to capture. Detection itself is *not*
+awaited there — it runs off the main actor while the overlay is already up and taking mouse
+events, and `RegionSelector` adopts the results when they land. Window highlighting works from the
+first frame; visual regions light up a moment later.
+
+Each display is sampled at its **point** grid, so one sample is at most two source pixels. That
+bound is the accuracy the feature promises and `downscaleErrorBound` in the tests measures it
+rather than asserting it in a comment.
+
+### Three measurements, three different jobs
+
+| Measurement | Answers | Why it cannot do the others' job |
+|---|---|---|
+| **Banded step** — mean colour of a short band each side of a candidate line, with a guard gap between | *Is* there an edge near here | Reports the same full step at every line within the guard gap of the truth, so it cannot localise |
+| **Fine gradient** — single-sample colour difference, averaged along the whole edge | *Where* exactly | Averaging along the edge cancels noise while keeping cross-edge sharpness; alone, at one row, it is noise |
+| **Profile separation** — ten samples marching outwards each side, ranked along the step's own colour axis | Is this a region boundary or texture | Body text, table rules and striped lists all produce genuine band steps; only interleaving of the two profiles distinguishes them |
+
+The first version of this shipped with only the banded step, and every rectangle it reported was
+off by an arbitrary amount up to the guard gap while rows of body text assembled into two dozen
+confident false rectangles. Both failures are the same mistake: asking one measurement a question
+it cannot answer.
+
+Ranking the separation profiles along the *step's own colour axis* rather than by brightness is
+what lets a rust-coloured panel on mid-grey work — obviously different colours, almost exactly the
+same luma. Nothing in the detector tests for "white"; polarity is measured, never assumed.
+
+### Deciding what the user meant
+
+`VisualRegionPicker` owns that, separately from detection, because "what rectangles are there"
+and "which one did the user mean" are different questions with different failure modes.
+
+- Below the confidence bar a rectangle does not exist: no highlight, no click target, no snap
+  line. That *is* the fall-back-to-window rule — there is no second code path to get wrong.
+- Among the confident ones containing the pointer, the **smallest** wins. A panel inside a canvas
+  inside a window is three plausible targets and the innermost is the most specific.
+- A rectangle that is essentially the window it sits in, or that mostly lies outside it, loses to
+  the window: the window server's frame is exact, an inferred edge is not.
+
+Three separate guards stop a flat backdrop from swallowing window selection: a side flush with the
+edge of the field has no outside to compare against and is not a boundary at all, confidence
+tapers towards the maximum area fraction, and the picker refuses a rectangle that is essentially
+the window. The first is why the desktop wallpaper can never be a candidate.
+
+Hover, the pixel readout, the click and the snap set all read one `SelectionTarget`, so they
+cannot disagree about what is on offer. Before candidates enter that shared target, their inferred
+frame is pulled inward by three **source pixels** on every side. That leaves an anti-aliased,
+dark or coloured detection rim out of the resulting capture on both 1× and Retina screens.
+Holding Option still disables snapping wholesale — that switch is in `SnapEngine` and this does
+not touch it.
 
 ## Selection overlay
 

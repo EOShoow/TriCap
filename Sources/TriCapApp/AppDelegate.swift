@@ -89,6 +89,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        AnimationClipboardFileStore.removeExpiredFiles()
         livePreEncoder?.cancel()
         livePreEncoder = nil
         pinboard.closeAll()
@@ -743,6 +744,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             settings: store.settings,
             windowDelegate: self,
             preEncoded: preEncoded,
+            autoCopyAnimation: source.isClip,
+            onCopied: { [weak self] receipt in
+                self?.toast.showNotice(receipt.message, systemImage: "doc.on.clipboard", isWarning: false)
+            },
             onExported: { [weak self] result in self?.handleExport(result) }
         )
     }
@@ -759,8 +764,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if settings.copyReferenceAfterExport || settings.copyImageAfterExport {
             pasteboard.clearContents()
         }
-        if settings.copyImageAfterExport, let image = NSImage(contentsOf: result.url) {
-            copiedImage = pasteboard.writeObjects([image])
+        if settings.copyImageAfterExport {
+            if result.format.isAnimated {
+                // This file exists only because the user chose Save. Passing the file preserves
+                // the complete animation; NSImage would let a receiver take only its first frame.
+                copiedImage = pasteboard.writeObjects([result.url as NSURL])
+            } else if let image = NSImage(contentsOf: result.url) {
+                copiedImage = pasteboard.writeObjects([image])
+            }
         }
         if settings.copyReferenceAfterExport {
             copiedReference = pasteboard.setString(result.reference, forType: .string)

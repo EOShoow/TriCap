@@ -390,6 +390,25 @@ fixed overlay rather than something that drifts.
 
 ## Export and verification
 
+### 动图剪贴板与手动保存
+
+`ExportService.encodeAnimation` 在内存中编码并验证，`exportAnimation` 在用户主动 Save 后
+写入文件并使用同一验证函数回读。`PasteboardAnimation` 按相同裁剪、标注和时间轴逐帧编码 GIF；
+GIF 的绝对时间端点取整到 10 ms，避免 12 fps 的逐帧舍入误差累积。两个格式和文件 URL 属于同一个剪贴板项。
+
+生产录制通过 `EditorPresenter` 请求一次自动复制。缺少实时编码结果时先等待后台准备；
+后续编辑需要显式 Copy。后台完成前发生新的复制，或编辑器已关闭时，旧任务不会覆盖剪贴板。
+Return 默认 Copy，`⌘S` 才 Save，截图编辑器延续原有操作。
+
+`AnimationClipboardFileStore` 仅写系统临时目录中的私有 GIF（目录 0700、文件 0600）。
+剪贴板不再引用文件后保留 5 分钟，以便接收应用完成导入；活跃文件在 TriCap 退出后仍能粘贴。
+再次复制时清理超过一天、无活跃引用的遗留缓存。
+加入文件表示的依据是 [Chromium 的 macOS 剪贴板实现](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/ui/base/clipboard/clipboard_mac.mm)：
+普通图片路径读取或转码 PNG，文件路径单独保留附件。该实现依据不等于所有接收应用的实际粘贴验收。
+
+`AnimationClipboardTests` 验证格式、帧数、时长、循环、编辑结果、文件表示与缓存回收；
+`--selftest-animation-clipboard` 使用真实 `EditorModel` 和独立剪贴板验证自动/手动操作。
+
 `ExportService` never reports success on an unverified file. After writing it re-reads the bytes
 and checks:
 

@@ -6,6 +6,10 @@ import AppKit
 let application = NSApplication.shared
 application.setActivationPolicy(.accessory)
 
+if AnimationClipboardSelfTest.runIfRequested(arguments: CommandLine.arguments) {
+    exit(0)
+}
+
 // `--render-ui-snapshots <dir>` draws the real views offscreen and exits. See UISnapshotRenderer.
 if UISnapshotRenderer.runIfRequested(arguments: CommandLine.arguments) {
     exit(0)

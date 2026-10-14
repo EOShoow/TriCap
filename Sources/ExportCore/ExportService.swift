@@ -27,6 +27,16 @@ public struct ExportResult: Sendable, Equatable {
     public let colorSpaceNotice: String?
 }
 
+/// Verified animation bytes held in memory. Encoding does not imply saving a file.
+public struct EncodedAnimation: Sendable {
+    public let data: Data
+    public let pixelSize: CGSize
+    public let container: MagicBytes.Container
+    public let animationInfo: WebPCodec.AnimationInfo
+    public let submittedFrameCount: Int
+    public let collapsedToSingleFrame: Bool
+}
+
 /// Lazily supplies annotated frames to the animated encoder.
 ///
 /// Frames are pulled one at a time rather than handed over as an array: a 15 s clip at 1440 px
@@ -181,20 +191,19 @@ public enum ExportService {
         )
     }
 
-    public static func exportAnimation(
+    private static func encodeAnimationData(
         source: AnimationFrameSource,
         annotations: [AnnotationItem],
         options: AnimatedWebPOptions,
-        directory: URL,
-        baseName: String,
-        vaultRoot: URL?,
-        linkStyle: MarkdownLinkStyle,
-        colorSpaceNotice: String? = nil,
         preEncoded: PreEncodedAnimation? = nil,
         strategy: AnimationEncodeStrategy = .default,
         progress: ((Double) -> Void)? = nil,
-        cropRect: CGRect? = nil
-    ) throws -> ExportResult {
+        cropRect: CGRect? = nil,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) throws -> Data {
+        guard !isCancelled() else {
+            throw TriCapError.encodingFailed("Animation preparation was cancelled.")
+        }
         guard source.frameCount > 0 else { throw TriCapError.noFramesCaptured }
         guard source.timestampsMs.count == source.frameCount else {
             throw TriCapError.encodingFailed(
@@ -202,9 +211,6 @@ public enum ExportService {
             )
         }
         try validateCrop(cropRect, canvasSize: source.canvasSize)
-        // Every check below runs against the canvas the file must actually have.
-        let outputCanvasSize = cropRect?.size ?? source.canvasSize
-
         // The fast path is an optimisation only: it may change how long this takes and nothing
         // else. Everything downstream — writing, re-reading, and every verification below — is
         // identical either way, so a pre-encoded file that is somehow wrong is caught by the same
@@ -223,78 +229,76 @@ public enum ExportService {
         } else {
             data = try encodeStreaming(
                 source: source, annotations: annotations, options: options,
-                strategy: strategy, progress: progress, cropRect: cropRect
+                strategy: strategy, progress: progress, cropRect: cropRect,
+                isCancelled: isCancelled
             )
         }
-        TriCapLog.export.info("animation export: \(decision.reason, privacy: .public)")
+        TriCapLog.export.info("animation encoding: \(decision.reason, privacy: .public)")
+        return data
+    }
+
+    /// Render and verify an animation without touching the filesystem.
+    public static func encodeAnimation(
+        source: AnimationFrameSource,
+        annotations: [AnnotationItem],
+        options: AnimatedWebPOptions,
+        preEncoded: PreEncodedAnimation? = nil,
+        strategy: AnimationEncodeStrategy = .default,
+        progress: ((Double) -> Void)? = nil,
+        cropRect: CGRect? = nil,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) throws -> EncodedAnimation {
+        let data = try encodeAnimationData(
+            source: source, annotations: annotations, options: options,
+            preEncoded: preEncoded, strategy: strategy, progress: progress,
+            cropRect: cropRect, isCancelled: isCancelled
+        )
+        return try verifyAnimation(
+            data, source: source, options: options, cropRect: cropRect
+        )
+    }
+
+    public static func exportAnimation(
+        source: AnimationFrameSource,
+        annotations: [AnnotationItem],
+        options: AnimatedWebPOptions,
+        directory: URL,
+        baseName: String,
+        vaultRoot: URL?,
+        linkStyle: MarkdownLinkStyle,
+        colorSpaceNotice: String? = nil,
+        preEncoded: PreEncodedAnimation? = nil,
+        strategy: AnimationEncodeStrategy = .default,
+        progress: ((Double) -> Void)? = nil,
+        cropRect: CGRect? = nil
+    ) throws -> ExportResult {
+        // Save verifies the re-read file once, keeping the original export tail cost.
+        let data = try encodeAnimationData(
+            source: source, annotations: annotations, options: options,
+            preEncoded: preEncoded, strategy: strategy, progress: progress, cropRect: cropRect
+        )
 
         let url = try OutputFileWriter.write(
             data, to: directory, baseName: baseName, fileExtension: OutputFormat.animatedWebP.fileExtension
         )
 
         do {
-            let container = try MagicBytes.detect(fileAt: url)
-            guard container == .webpAnimated || container == .webpStill else {
-                throw TriCapError.encodingFailed(
-                    "Wrote \(url.lastPathComponent) but its bytes look like \(container.rawValue), not WebP."
-                )
-            }
             let written = try Data(contentsOf: url, options: [.mappedIfSafe])
-            let info = try WebPCodec.inspectAnimation(data: written)
-
-            guard info.canvasWidth == Int(outputCanvasSize.width.rounded()),
-                  info.canvasHeight == Int(outputCanvasSize.height.rounded()) else {
-                throw TriCapError.encodingFailed(
-                    "Written animation is \(info.canvasWidth)x\(info.canvasHeight) but should be \(Int(outputCanvasSize.width))x\(Int(outputCanvasSize.height))."
-                )
-            }
-            // libwebp merges a frame that is identical to its predecessor into that frame's
-            // duration, so the stored count can legitimately be lower than the submitted count —
-            // but never higher, and never zero.
-            guard info.frameCount >= 1, info.frameCount <= source.frameCount else {
-                throw TriCapError.encodingFailed(
-                    "Written animation has \(info.frameCount) frames, which is not between 1 and the \(source.frameCount) submitted."
-                )
-            }
-
-            // When *nothing* changed for the whole recording, every frame merges into one and
-            // libwebp writes a plain still WebP with no ANIM chunk (hence loop count 1 and a zero
-            // duration). That file is correct, so it is kept — but it is reported rather than
-            // dressed up as an animation.
-            let collapsed = info.frameCount == 1 && container == .webpStill
-            if !collapsed {
-                guard container == .webpAnimated else {
-                    throw TriCapError.encodingFailed(
-                        "Expected an animated WebP but the written file is \(container.rawValue)."
-                    )
-                }
-                // Playback length is the invariant that must survive frame coalescing exactly.
-                guard info.totalDurationMs == source.endTimestampMs else {
-                    throw TriCapError.encodingFailed(
-                        "Written animation runs \(info.totalDurationMs) ms but should run \(source.endTimestampMs) ms."
-                    )
-                }
-                guard zip(info.frameTimestampsMs, info.frameTimestampsMs.dropFirst()).allSatisfy({ $1 > $0 }) else {
-                    throw TriCapError.encodingFailed("Written animation has non-increasing frame timestamps.")
-                }
-                guard info.loopCount == options.loopCount else {
-                    throw TriCapError.encodingFailed(
-                        "Written animation loops \(info.loopCount) times but \(options.loopCount) was requested."
-                    )
-                }
-            }
+            let verified = try verifyAnimation(
+                written, source: source, options: options, cropRect: cropRect
+            )
 
             return ExportResult(
                 url: url,
                 format: .animatedWebP,
-                pixelSize: outputCanvasSize,
-                byteCount: data.count,
+                pixelSize: verified.pixelSize,
+                byteCount: written.count,
                 reference: MarkdownReference.reference(for: url, vaultRoot: vaultRoot, style: linkStyle),
-                container: container,
-                animationInfo: info,
+                container: verified.container,
+                animationInfo: verified.animationInfo,
                 submittedFrameCount: source.frameCount,
-                collapsedToSingleFrame: collapsed,
-                colorSpaceNotice: collapsed
+                collapsedToSingleFrame: verified.collapsedToSingleFrame,
+                colorSpaceNotice: verified.collapsedToSingleFrame
                     ? "Nothing on screen changed during the recording, so it was saved as a single-frame WebP instead of an animation."
                     : colorSpaceNotice
             )
@@ -302,6 +306,49 @@ public enum ExportService {
             try? FileManager.default.removeItem(at: url)
             throw error
         }
+    }
+
+    /// Both clipboard bytes and the file re-read after Save pass the same gates.
+    private static func verifyAnimation(
+        _ data: Data,
+        source: AnimationFrameSource,
+        options: AnimatedWebPOptions,
+        cropRect: CGRect?
+    ) throws -> EncodedAnimation {
+        let outputSize = cropRect?.size ?? source.canvasSize
+        let container = MagicBytes.detect(data)
+        guard container == .webpAnimated || container == .webpStill else {
+            throw TriCapError.encodingFailed("Encoded bytes are not WebP.")
+        }
+        let info = try WebPCodec.inspectAnimation(data: data)
+        guard info.canvasWidth == Int(outputSize.width.rounded()),
+              info.canvasHeight == Int(outputSize.height.rounded()) else {
+            throw TriCapError.encodingFailed("Encoded animation has the wrong canvas size.")
+        }
+        // Identical consecutive frames may coalesce, while duration must stay exact.
+        guard info.frameCount >= 1, info.frameCount <= source.frameCount else {
+            throw TriCapError.encodingFailed("Encoded animation has an invalid frame count.")
+        }
+        let collapsed = info.frameCount == 1 && container == .webpStill
+        if !collapsed {
+            guard container == .webpAnimated else {
+                throw TriCapError.encodingFailed("Expected an animated WebP.")
+            }
+            guard info.totalDurationMs == source.endTimestampMs else {
+                throw TriCapError.encodingFailed("Encoded animation has the wrong playback duration.")
+            }
+            guard zip(info.frameTimestampsMs, info.frameTimestampsMs.dropFirst()).allSatisfy({ $1 > $0 }) else {
+                throw TriCapError.encodingFailed("Encoded animation has non-increasing frame timestamps.")
+            }
+            guard info.loopCount == options.loopCount else {
+                throw TriCapError.encodingFailed("Encoded animation has the wrong loop count.")
+            }
+        }
+        return EncodedAnimation(
+            data: data, pixelSize: outputSize, container: container,
+            animationInfo: info, submittedFrameCount: source.frameCount,
+            collapsedToSingleFrame: collapsed
+        )
     }
 
     /// Pull each frame, composite the fixed annotation overlay onto it, crop, hand it to libwebp,

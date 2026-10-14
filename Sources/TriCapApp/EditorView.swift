@@ -324,7 +324,10 @@ struct EditorView: View {
 
                 Spacer()
 
-                if model.isExporting {
+                if model.isCopying {
+                    ProgressView(value: model.copyProgress)
+                        .frame(width: 90)
+                } else if model.isExporting {
                     ProgressView(value: model.exportProgress)
                         .frame(width: 120)
                 } else if model.isPreparingExport {
@@ -332,7 +335,7 @@ struct EditorView: View {
                     // measured 1817×1208 sample, and a bare spinner over that long reads as hung.
                     ProgressView(value: model.preparationProgress)
                         .frame(width: 120)
-                        .help("Preparing the edited animation before saving")
+                        .help("Preparing the edited animation for Copy or Save")
                 }
 
                 if model.savedFileURL != nil {
@@ -346,13 +349,26 @@ struct EditorView: View {
                     Button("Retry preparation") { model.scheduleExportPreparation() }
                 }
 
-                Button(model.isExporting ? "Saving…" : (model.isPreparingExport ? "Preparing…" : "Save")) { model.export() }
+                if model.source.isClip {
+                    Button("Save") { model.export() }
+                        .keyboardShortcut("s", modifiers: .command)
+                        .disabled(model.isExporting || model.isCopying || model.isPreparingExport || model.exportPreparationFailed)
+                    Button(model.isCopying ? "Copying…" : (model.isPreparingExport ? "Preparing…" : "Copy")) {
+                        model.copyAnimation()
+                    }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(model.isExporting || model.isPreparingExport || model.exportPreparationFailed)
+                    .disabled(model.isExporting || model.isCopying || model.isPreparingExport || model.exportPreparationFailed)
+                } else {
+                    Button(model.isExporting ? "Saving…" : "Save") { model.export() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(model.isExporting)
+                }
             }
 
             // Where the file will land, before the user commits to saving.
-            Text("Saves to \(model.saveDirectoryDisplayPath)")
+            Text(model.source.isClip
+                 ? "Copy to paste an animation. Save writes a WebP to \(model.saveDirectoryDisplayPath)."
+                 : "Saves to \(model.saveDirectoryDisplayPath)")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)

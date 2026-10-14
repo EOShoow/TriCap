@@ -45,6 +45,9 @@ final class EditorPresenter {
         windowDelegate: NSWindowDelegate?,
         orderFront: Bool = true,
         preEncoded: PreEncodedAnimation? = nil,
+        autoCopyAnimation: Bool = false,
+        pasteboard: NSPasteboard = .general,
+        onCopied: @escaping (PasteboardAnimation.WriteReceipt) -> Void = { _ in },
         onExported: @escaping (ExportResult) -> Void
     ) -> Handle {
         let box = WindowBox()
@@ -53,6 +56,9 @@ final class EditorPresenter {
             source: source,
             settings: settings,
             preEncoded: preEncoded,
+            autoCopyAnimation: autoCopyAnimation,
+            pasteboard: pasteboard,
+            onCopied: onCopied,
             onExported: onExported,
             // `box` is captured strongly; `box.window` is weak, so the cycle is broken here.
             onClosed: { box.window?.close() }
@@ -83,6 +89,7 @@ final class EditorPresenter {
     func release(_ window: NSWindow) {
         guard let owned = windows.removeValue(forKey: ObjectIdentifier(window)) else { return }
         owned.delegate = nil
+        (owned.contentViewController as? NSHostingController<EditorView>)?.rootView.model.cancelPendingWork()
         // Tearing down the content view controller drops the SwiftUI hosting view (and with it the
         // `EditorModel`) without waiting for AppKit to get around to releasing the window.
         owned.contentViewController = nil

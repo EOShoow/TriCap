@@ -31,5 +31,11 @@ if [[ -d "$INTEROP_LIB" ]]; then
   ARGS+=(-Xlinker -rpath -Xlinker "$INTEROP_LIB")
 fi
 
+# Recent CLT SwiftPM builds do not discover Testing's macro plugin automatically.
+TESTING_MACROS="$DEVELOPER_DIR_PATH/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+if [[ -f "$TESTING_MACROS" ]]; then
+  ARGS+=(-Xswiftc -load-plugin-library -Xswiftc "$TESTING_MACROS")
+fi
+
 echo "==> swift test ${*:-}"
 exec swift test "${ARGS[@]}" "$@"

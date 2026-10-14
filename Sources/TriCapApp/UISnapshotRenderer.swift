@@ -137,6 +137,32 @@ enum UISnapshotRenderer {
             to: directory.appendingPathComponent("03-editor-clip-trim.png")
         )
 
+        // A ready clip at the editor's minimum width: Copy is the default, Save is secondary.
+        let copyClip = syntheticClip()
+        guard let copyTimeline = ClipTiming.timeline(
+            for: copyClip.frames, nominalFrameInterval: copyClip.nominalFrameInterval,
+            totalDuration: copyClip.duration
+        ) else { throw TriCapError.noFramesCaptured }
+        let copySource = AnimationFrameSource(
+            frameCount: copyClip.frames.count, timestampsMs: copyTimeline.timestampsMs,
+            endTimestampMs: copyTimeline.endTimestampMs, canvasSize: copyClip.pixelSize
+        ) { index in
+            guard let image = copyClip.frames[index].decodedImage() else { throw TriCapError.noFramesCaptured }
+            return image
+        }
+        let copyArtifact = try ExportService.prepareAnimation(
+            source: copySource, options: store.settings.animatedWebPOptions, cropRect: nil
+        )
+        let copyModel = EditorModel(
+            source: .clip(copyClip), settings: store.settings, preEncoded: copyArtifact,
+            onExported: { _ in }, onClosed: {}
+        )
+        copyModel.statusMessage = "Copied animation — ready to paste."
+        try write(
+            hosting(EditorView(model: copyModel), size: CGSize(width: 680, height: 660)),
+            to: directory.appendingPathComponent("22-editor-clip-copy.png")
+        )
+
         // A one-frame clip: the trim and scrub sliders must be absent, not padded to 0...1.
         let singleFrameModel = EditorModel(
             source: .clip(syntheticClip(frameCount: 1)),

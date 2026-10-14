@@ -51,6 +51,8 @@ public final class EditorModel: ObservableObject {
 
     @Published public var isExporting = false
     @Published public var exportProgress: Double = 0
+    @Published public private(set) var isCopying = false
+    @Published public private(set) var copyProgress: Double = 0
     /// A changed animated export is deliberately gated until its exact artifact is ready.
     @Published public private(set) var isPreparingExport = false
     /// 0...1 across the preparation encode, so a long "Preparing…" visibly moves. At the
@@ -72,7 +74,14 @@ public final class EditorModel: ObservableObject {
     private let settings: AppSettings
     private var frameCache: (index: Int, image: CGImage)?
     private let onExported: (ExportResult) -> Void
+    private let onCopied: (PasteboardAnimation.WriteReceipt) -> Void
     private let onClosed: () -> Void
+    private let pasteboard: NSPasteboard
+    private var clipboardTask: Task<Void, Never>?
+    private var clipboardCancelFlag: ExportService.PreparationCancelFlag?
+    private var clipboardGeneration = 0
+    private var clipboardPayload: PasteboardAnimation.Payload?
+    private var automaticCopyChangeCount: Int?
 
     /// The animation encoded while the recording was running, if there is one.
     ///
@@ -92,6 +101,9 @@ public final class EditorModel: ObservableObject {
         source: EditorSource,
         settings: AppSettings,
         preEncoded: PreEncodedAnimation? = nil,
+        autoCopyAnimation: Bool = false,
+        pasteboard: NSPasteboard = .general,
+        onCopied: @escaping (PasteboardAnimation.WriteReceipt) -> Void = { _ in },
         onExported: @escaping (ExportResult) -> Void,
         onClosed: @escaping () -> Void
     ) {
@@ -99,7 +111,9 @@ public final class EditorModel: ObservableObject {
         self.settings = settings
         self.preEncoded = preEncoded
         self.onExported = onExported
+        self.onCopied = onCopied
         self.onClosed = onClosed
+        self.pasteboard = pasteboard
         self.style = AnnotationStyle()
 
         switch source {
@@ -128,6 +142,10 @@ public final class EditorModel: ObservableObject {
         // the first Save unexpectedly fall back to a foreground encode.
         if source.isClip, preEncoded == nil {
             scheduleExportPreparation()
+        }
+        if source.isClip, autoCopyAnimation {
+            automaticCopyChangeCount = pasteboard.changeCount
+            if !isPreparingExport { copyAnimation(automatically: true) }
         }
     }
 
@@ -337,6 +355,10 @@ public final class EditorModel: ObservableObject {
     /// Prepare the current trim/crop after a short idle delay. A slider drag may emit dozens of
     /// values, so only the newest settled state is allowed to keep its artifact.
     public func scheduleExportPreparation() {
+        cancelClipboardCopy()
+        clipboardPayload = nil
+        automaticCopyChangeCount = nil
+        if source.isClip { statusMessage = nil }
         preparationGeneration &+= 1
         let generation = preparationGeneration
         preparationCancelFlag?.cancel()
@@ -420,6 +442,9 @@ public final class EditorModel: ObservableObject {
             case .success(let artifact):
                 self.preparedAnimation = artifact
                 self.isPreparingExport = false
+                if self.automaticCopyChangeCount != nil {
+                    self.copyAnimation(automatically: true)
+                }
             case .failure(let error):
                 self.isPreparingExport = false
                 self.exportPreparationFailed = true
@@ -449,15 +474,125 @@ public final class EditorModel: ObservableObject {
         isPreparingExport = false
     }
 
+    // MARK: - Clipboard
+
+    public func copyAnimation() { copyAnimation(automatically: false) }
+
+    private func copyAnimation(automatically: Bool) {
+        guard case .clip(let clip) = source,
+              !isCopying, !isExporting, !isPreparingExport, !exportPreparationFailed else { return }
+        let changeCount = automatically ? automaticCopyChangeCount : pasteboard.changeCount
+        automaticCopyChangeCount = nil
+        guard let changeCount, changeCount == pasteboard.changeCount else {
+            statusMessage = "Clipboard changed while preparing — press Copy to copy the animation."
+            return
+        }
+        pause()
+        errorMessage = nil
+        if let clipboardPayload {
+            finishCopy(.success(clipboardPayload), changeCount: changeCount)
+            return
+        }
+        guard let range = ClipTrimmer.normalizedRange(
+            first: trimStart, last: trimEnd, count: clip.frames.count
+        ) else {
+            errorMessage = TriCapError.noFramesCaptured.localizedDescription
+            return
+        }
+        let trimmed = ClipTrimmer.trim(frames: clip.frames, to: range)
+        let span = ClipTrimmer.trimmedDuration(frames: clip.frames, range: range, clipDuration: clip.duration)
+        guard let timeline = ClipTiming.timeline(
+            for: trimmed, nominalFrameInterval: clip.nominalFrameInterval, totalDuration: span
+        ) else {
+            errorMessage = TriCapError.noFramesCaptured.localizedDescription
+            return
+        }
+        let source = AnimationFrameSource(
+            frameCount: trimmed.count, timestampsMs: timeline.timestampsMs,
+            endTimestampMs: timeline.endTimestampMs, canvasSize: canvasSize
+        ) { index in
+            guard let image = trimmed[index].decodedImage() else {
+                throw TriCapError.encodingFailed("Frame \(index) could not be decoded.")
+            }
+            return image
+        }
+        let annotations = document.items
+        let crop = CropGeometry.effectiveCrop(cropRect, canvasSize: canvasSize)
+        let options = settings.animatedWebPOptions
+        let artifact = preparedAnimation ?? preEncoded
+        let flag = ExportService.PreparationCancelFlag()
+        clipboardCancelFlag = flag
+        clipboardGeneration &+= 1
+        let generation = clipboardGeneration
+        isCopying = true
+        copyProgress = 0
+        statusMessage = nil
+        let progress: @Sendable (Double) -> Void = { [weak self] value in
+            Task { @MainActor [weak self] in
+                guard let self, self.clipboardGeneration == generation else { return }
+                self.copyProgress = value
+            }
+        }
+        clipboardTask = Task { [weak self] in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try PasteboardAnimation.prepare(
+                        source: source, annotations: annotations, options: options,
+                        preEncoded: artifact, cropRect: crop,
+                        isCancelled: { flag.isCancelled }, progress: progress
+                    )
+                }
+            }.value
+            guard let self, !flag.isCancelled, self.clipboardGeneration == generation else { return }
+            self.finishCopy(outcome, changeCount: changeCount)
+        }
+    }
+
+    private func finishCopy(
+        _ outcome: Result<PasteboardAnimation.Payload, Error>, changeCount: Int
+    ) {
+        isCopying = false
+        clipboardTask = nil
+        clipboardCancelFlag = nil
+        switch outcome {
+        case .success(let payload):
+            clipboardPayload = payload
+            // A slow GIF encode must never overwrite something the user copied more recently.
+            guard pasteboard.changeCount == changeCount else {
+                statusMessage = "Clipboard changed while preparing — press Copy to copy the animation."
+                return
+            }
+            guard let receipt = PasteboardAnimation.write(payload, to: pasteboard) else {
+                errorMessage = "Couldn’t copy the animation. It is still open — try Copy again or choose Save."
+                return
+            }
+            statusMessage = receipt.message
+            onCopied(receipt)
+        case .failure(let error):
+            errorMessage = "Couldn’t copy the animation: \(error.localizedDescription)"
+        }
+    }
+
+    private func cancelClipboardCopy() {
+        clipboardGeneration &+= 1
+        clipboardCancelFlag?.cancel()
+        clipboardCancelFlag = nil
+        clipboardTask?.cancel()
+        clipboardTask = nil
+        isCopying = false
+        copyProgress = 0
+    }
+
     // MARK: - Export
 
     public func export() {
         pause()
-        guard !isExporting else { return }
+        guard !isExporting, !isCopying else { return }
         guard !isPreparingExport, !exportPreparationFailed else { return }
         // The UI only enables Save after preparation, so keep the completed exact artifact and
         // stop any stale work between frames.
         stopPreparingExport()
+        automaticCopyChangeCount = nil
         isExporting = true
         exportProgress = 0
         errorMessage = nil
@@ -578,12 +713,21 @@ public final class EditorModel: ObservableObject {
     }
 
     public func close() {
-        pause()
-        invalidatePreparedAnimation()
+        cancelPendingWork()
         onClosed()
     }
 
+    /// Also called when the user closes the window through AppKit's title-bar control.
+    func cancelPendingWork() {
+        pause()
+        cancelClipboardCopy()
+        automaticCopyChangeCount = nil
+        invalidatePreparedAnimation()
+    }
+
     deinit {
+        clipboardCancelFlag?.cancel()
+        clipboardTask?.cancel()
         playbackTask?.cancel()
         preparationCancelFlag?.cancel()
         preparationTask?.cancel()

@@ -37,6 +37,18 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 
 Animated-WebP defaults: **12 fps, ≤ 15 s, long edge ≤ 1440 px, quality 80, loops forever, no audio.**
 
+### 动图直接粘贴
+
+录制完成后自动复制完整动图，编辑器默认按钮和 Return 操作为 **Copy**。
+裁剪、截短或标注后，按 **Copy** 复制当前版本；只有主动点 **Save** 或按 `⌘S` 才保存 WebP 到设置的目录。
+
+剪贴板同时提供 Animated WebP、GIF 和临时 GIF 文件表示，兼容读取图片数据或文件的应用。
+临时文件位于系统临时目录，剪贴板被替换后保留 5 分钟供接收应用完成导入，再自动清理；它不出现在保存目录。
+GIF 使用 256 色及 10 ms 时长精度；保存的 WebP 保留原有编码设置。接收应用仍可按自身规则压缩或转换附件。
+
+无需录屏权限的流程验收：`TriCap --selftest-animation-clipboard <测试输出目录>`。
+它使用独立剪贴板，检查自动复制、编辑后复制、只有主动保存才落盘、关闭取消及较新剪贴板内容保护。
+
 ---
 
 ## Requirements
@@ -97,7 +109,7 @@ TriCap has no Dock icon — look for the viewfinder icon in the menu bar.
 ./scripts/test.sh
 ```
 
-449 tests. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
+568 test cases. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
 `Testing.framework` on the search path unless Xcode is the active developer directory; the script
 adds the `-F` and `-rpath` flags that make `swift test` work with CLT only. With Xcode installed,
 plain `swift test` also works.

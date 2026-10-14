@@ -4,6 +4,9 @@ import ExportCore
 import SwiftUI
 import TriCapKit
 
+// Keep the property wrapper distinct from the newer SDK's @State macro (absent in CLT).
+private typealias ViewState<Value> = SwiftUI.State<Value>
+
 /// The settings window.
 ///
 /// Four tabs, each answering one question: *how do I start a capture*, *how good should it look*,
@@ -13,9 +16,9 @@ import TriCapKit
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     @ObservedObject var loginItem: LoginItemController
-    @State private var hotKeyError: String?
-    @State private var pinHotKeyError: String?
-    @State private var showAdvancedQuality: Bool
+    @ViewState private var hotKeyError: String?
+    @ViewState private var pinHotKeyError: String?
+    @ViewState private var showAdvancedQuality: Bool
 
     /// Injected by the app so the About tab can reopen the welcome window.
     var onShowWelcome: (() -> Void)?

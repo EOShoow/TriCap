@@ -32,8 +32,8 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 - **Export** PNG, JPEG, static WebP, or Animated WebP.
 - **Copy a reference** to the clipboard: a *relative* Markdown/Obsidian image reference when the
   file lands inside your configured vault root, otherwise the absolute file path.
-- **Reference a Window…** (`⌥⇧6`) copies the selected window's application and live window
-  identity for Claude Desktop / Cowork. Paste it into your conversation to identify the target.
+- **Press ⌘ twice** (or **Copy Front Window for Claude**) to copy the front window's app, title and
+  window ID for Claude. Paste it into your conversation and add your request.
 - **After saving**, a confirmation tells you the file name, the folder, the size, and exactly what
   went on the clipboard — with a **Show in Finder** button.
 
@@ -161,6 +161,9 @@ TriCap needs **Screen & System Audio Recording**. macOS asks once, the first tim
   TriCap detects this state and offers a button that opens the pane directly.
 - Newly granted permission does not always apply to an already-running process, so TriCap tells
   you to relaunch when the switch is on but capture still fails.
+- **Input Monitoring** is optional and only for the ⌘⌘ window reference: a bare modifier cannot be
+  a Carbon hot key. TriCap asks only when you click **Turn On ⌘⌘ Shortcut…**; the listen-only tap
+  sees that ⌘ was pressed twice, never which keys you type. Without it the menu command still works.
 - No other permission is requested. TriCap never records audio and has no microphone, camera,
   location or network entitlement.
 
@@ -194,13 +197,21 @@ identity to avoid that. This repository does not sign, notarize or publish.
 
 ### 引用窗口给 Claude / Cowork
 
-按 **`⌥⇧6`**，或从菜单选择 **Reference a Window…**，再点选目标窗口。
-TriCap 将应用名、Bundle ID、PID、完整窗口标题、macOS CGWindowID 和当时位置复制为一段定位引用，
-回到原应用后可直接粘贴到 Claude 桌面版／Cowork。快捷键可在 Settings → General 修改。
+在目标窗口里**连按两下 `⌘`**（或同时按住左右两个 `⌘`），TriCap 直接把最前窗口的
+应用名、Bundle ID、PID、窗口标题和窗口 ID 复制为一行 JSON，不需要点选，也不带任何说明文字。
+到 Claude 里粘贴，再写上要做的事即可，例如：
 
-这个入口只选择完整窗口；`Esc` 或右键取消，点击空白桌面会继续等待选择。
-选中后会重新核对窗口身份，引用中也要求 Cowork 在操作前读取当前窗口，避免依赖过时坐标。
-引用独立于截图／录制模式，不改变截图快捷键记住的模式。
+```text
+{"app":"微信","bundleId":"com.tencent.xinWeChat","pid":20240,"title":"微信","windowId":119145} 读取当前聊天
+```
+
+要引用多个窗口，就在每个窗口里依次连按两下 `⌘`：一分钟内、且期间没复制别的内容时，
+新窗口会追加为下一行，提示会显示当前共几个窗口；同一窗口不会重复添加。
+超过一分钟或中间复制过其他内容，则重新开始，只放当前窗口。
+
+双击 `⌘` 需要一次性授权「输入监控」：菜单 **Turn On ⌘⌘ Shortcut…** 或
+Settings → General → Window reference for Claude → **Turn On…**。
+未授权时，菜单 **Copy Front Window for Claude** 做同样的事。
 
 此操作只复制本地定位信息；Claude 能否访问目标窗口，取决于其电脑使用功能和应用访问许可。
 TriCap 不会自动向 Claude 发送消息，也不会为此保存截图或调用外部模型。

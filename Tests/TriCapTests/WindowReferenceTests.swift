@@ -1,160 +1,240 @@
-import AppKit
 import CoreGraphics
 import Foundation
 import Testing
-@testable import ExportCore
-@testable import SelectionUI
 @testable import TriCapKit
 
-private func referenceWindow(
+private func window(
     id: UInt32 = 42, pid: Int32 = 501, bundle: String = "com.example.Editor",
-    title: String = "Report — Draft", frame: CGRect = CGRect(x: 100, y: 200, width: 800, height: 500),
-    isOnScreen: Bool = true
+    title: String? = "Report — Draft", frame: CGRect = CGRect(x: 100, y: 200, width: 800, height: 500),
+    stackingIndex: Int = 0, isOnScreen: Bool = true
 ) -> WindowCandidate {
     WindowCandidate(
         id: id, frame: frame, isOnScreen: isOnScreen,
-        bundleIdentifier: bundle, title: title, applicationName: "Editor", processID: pid
+        bundleIdentifier: bundle, title: title, applicationName: "Editor", processID: pid,
+        stackingIndex: stackingIndex
     )
 }
 
-@Suite("Window locator identity and migration")
-struct WindowReferenceTests {
-    @Test("Existing settings gain the reference shortcut and retain their other choices")
-    func migratesSettings() throws {
-        let data = Data(#"{"hotKey":{"keyCode":17,"carbonModifiers":256},"pinHotKey":{"keyCode":118,"carbonModifiers":0},"lastCaptureFlow":"recording"}"#.utf8)
-        let settings = try JSONDecoder().decode(AppSettings.self, from: data)
-        #expect(settings.windowReferenceHotKey == .defaultWindowReference)
-        #expect(settings.hotKey.keyCode == 17 && settings.pinHotKey.keyCode == 118)
-        #expect(settings.lastCaptureFlow == .recording)
-        #expect(Set([HotKeyCombo.default, .defaultPin, .defaultWindowReference]).count == 3)
-        #expect(HotKeyCombo.defaultWindowReference.isValid)
-        #expect(HotKeyCombo.defaultWindowReference.displayString == "⌥⇧6")
+@Suite("Command-Command recognition")
+struct DoubleCommandTapTests {
+    /// One modifier change. A free function because `#expect` cannot call a mutating method.
+    private func change(
+        _ recognizer: inout DoubleCommandTap, command: Bool, both: Bool = false, others: Bool = false,
+        at time: TimeInterval
+    ) -> Bool {
+        recognizer.modifiersChanged(command: command, bothCommands: both, others: others, at: time)
     }
 
-    @Test("A custom locator shortcut survives reopening settings")
-    func roundTripsShortcut() throws {
-        var settings = AppSettings()
-        settings.windowReferenceHotKey = HotKeyCombo(keyCode: 118, carbonModifiers: 0)
-        #expect(try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings)) == settings)
+    /// Press and release ⌘ alone, `hold` seconds long, starting at `at`.
+    private func tap(_ recognizer: inout DoubleCommandTap, at time: TimeInterval, hold: TimeInterval = 0.08) -> Bool {
+        let down = change(&recognizer, command: true, at: time)
+        let up = change(&recognizer, command: false, at: time + hold)
+        return down || up
     }
 
-    @Test("A failed reference shortcut change rolls back to its own previous binding")
-    func shortcutRollsBack() {
-        let original = HotKeyCombo.defaultWindowReference
-        let outcome = HotKeyRegistrationPolicy.apply(desired: .default, previous: original) { $0 == original }
-        #expect(outcome.rolledBack && outcome.active == original)
+    @Test("Two quick taps fire once; a third tap starts a new pair")
+    func doubleTapFires() {
+        var recognizer = DoubleCommandTap()
+        #expect(!tap(&recognizer, at: 0))
+        #expect(tap(&recognizer, at: 0.25))
+        #expect(!tap(&recognizer, at: 0.5))
+        #expect(tap(&recognizer, at: 0.75))
     }
 
-    @Test("Coordinates are explicitly Quartz points, including a window above and left of the main screen")
-    func coordinateSpace() throws {
-        let window = referenceWindow(frame: CGRect(x: -1000, y: 1000, width: 600, height: 500))
-        let reference = try #require(WindowReference(window: window, primaryHeightInPoints: 900))
-        #expect(reference.boundsInQuartzPoints.x == -1000)
-        #expect(reference.boundsInQuartzPoints.y == -600)
-        #expect(reference.boundsInQuartzPoints.width == 600 && reference.boundsInQuartzPoints.height == 500)
-        #expect(reference.applicationName == "Editor" && reference.processID == 501 && reference.windowID == 42)
+    @Test("A slow second tap or a held ⌘ does not fire")
+    func timingLimits() {
+        var slow = DoubleCommandTap()
+        #expect(!tap(&slow, at: 0))
+        #expect(!tap(&slow, at: 0.08 + DoubleCommandTap.maximumGap + 0.05))
+
+        var held = DoubleCommandTap()
+        #expect(!tap(&held, at: 0, hold: DoubleCommandTap.maximumHold + 0.1))
+        #expect(!tap(&held, at: 0.6))
     }
 
-    @Test("Window titles are data: Unicode, quotes, newlines and code fences survive safely")
-    func titleIsEscapedData() throws {
-        let window = referenceWindow(title: "报价 ' \"\n```sh\n$(printf unexpected)\n```")
-        let date = Date(timeIntervalSince1970: 1_793_000_000.125)
-        let reference = try #require(WindowReference(window: window, primaryHeightInPoints: 900, capturedAt: date))
-        let json = try reference.json()
-        #expect(!json.contains("```"))
-        #expect(try WindowReference.decode(json: json) == reference)
-        let prompt = try reference.prompt()
-        #expect(prompt.components(separatedBy: "```").count == 3)
-        #expect(prompt.contains("Cowork") && prompt.contains("CGWindowID"))
-        #expect(prompt.contains("重新枚举") && prompt.contains("授权"))
+    @Test("⌘C then ⌘V, or ⌘ with another modifier, never fires")
+    func shortcutsDoNotFire() {
+        var copyPaste = DoubleCommandTap()
+        _ = change(&copyPaste, command: true, at: 0)
+        copyPaste.keyPressed()
+        _ = change(&copyPaste, command: false, at: 0.08)
+        _ = change(&copyPaste, command: true, at: 0.2)
+        copyPaste.keyPressed()
+        #expect(!change(&copyPaste, command: false, at: 0.28))
+
+        var typedBetween = DoubleCommandTap()
+        #expect(!tap(&typedBetween, at: 0))
+        typedBetween.keyPressed()
+        #expect(!tap(&typedBetween, at: 0.2))
+
+        var shifted = DoubleCommandTap()
+        #expect(!tap(&shifted, at: 0))
+        _ = change(&shifted, command: true, at: 0.2)
+        _ = change(&shifted, command: true, others: true, at: 0.22)
+        #expect(!change(&shifted, command: false, at: 0.3))
     }
 
-    @Test("Unidentifiable windows never produce a misleading locator")
-    func rejectsMissingIdentity() {
-        let window = WindowCandidate(id: 42, frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-        #expect(WindowReference(window: window, primaryHeightInPoints: 900) == nil)
-    }
-
-    @Test("A moved or renamed window is resolved by its live application and window IDs")
-    func resolvesLiveIdentity() throws {
-        let reference = try #require(WindowReference(window: referenceWindow(), primaryHeightInPoints: 900))
-        let moved = referenceWindow(title: "Report — Saved", frame: CGRect(x: 300, y: 50, width: 800, height: 500))
-        #expect(reference.resolve(in: [referenceWindow(id: 99), moved]) == .matched(moved))
-    }
-
-    @Test("A closed, hidden, replaced or restarted window never falls back to a matching title")
-    func rejectsStaleReference() throws {
-        let date = Date(timeIntervalSince1970: 1_793_000_000)
-        let reference = try #require(WindowReference(window: referenceWindow(), primaryHeightInPoints: 900, capturedAt: date))
-        for replacement in [
-            referenceWindow(id: 99), referenceWindow(pid: 502),
-            referenceWindow(bundle: "com.other.Editor"), referenceWindow(isOnScreen: false),
-        ] {
-            #expect(reference.resolve(in: [replacement]) == .unavailable)
-        }
-        #expect(reference.resolve(in: []) == .unavailable)
-        #expect(reference.resolve(in: [referenceWindow()], processLaunchDate: date.addingTimeInterval(1)) == .unavailable)
-        #expect(reference.resolve(in: [referenceWindow(), referenceWindow()]) == .ambiguous)
+    @Test("Both ⌘ keys together fire once, and releasing them does not fire again")
+    func bothCommandKeys() {
+        var recognizer = DoubleCommandTap()
+        #expect(!change(&recognizer, command: true, at: 0))
+        #expect(change(&recognizer, command: true, both: true, at: 0.05))
+        #expect(!change(&recognizer, command: true, at: 0.1))
+        #expect(!change(&recognizer, command: false, at: 0.12))
+        #expect(!tap(&recognizer, at: 0.3))
+        #expect(tap(&recognizer, at: 0.5))
     }
 }
 
-@MainActor
-@Suite("Cowork window locator clipboard and picker")
-struct WindowReferenceClipboardTests {
-    @Test("Escape cancels window picking before closing a pin, then returns to the pin")
-    func escapePriority() {
-        let claim = PriorityHotKeyClaim(combo: .bareEscape, register: { _, _ in true }, unregister: {})
-        var actions: [String] = []
-        let pin = claim.push(priority: .pin) { actions.append("pin") }
-        let selection = claim.push(priority: .selection) { actions.append("selection") }
-        claim.simulateFire()
-        claim.pop(selection)
-        claim.simulateFire()
-        claim.pop(pin)
-        #expect(actions == ["selection", "pin"])
-        #expect(claim.depth == 0 && !claim.isClaimed)
+@Suite("Front-window reference for Claude")
+struct WindowReferenceTests {
+    @Test("The front app's topmost ordinary window is chosen")
+    func choosesFrontAppWindow() {
+        let windows = [
+            window(id: 1, pid: 700, bundle: "com.other.App", stackingIndex: 0),
+            window(id: 2, pid: 501, stackingIndex: 2),
+            window(id: 3, pid: 501, stackingIndex: 1),
+            window(id: 4, pid: 501, stackingIndex: 0, isOnScreen: false),
+        ]
+        let chosen = WindowReference.frontWindow(in: windows, frontmostProcessID: 501, ownBundleIdentifier: nil)
+        #expect(chosen?.id == 3)
     }
 
-    @Test("Clipboard carries self-contained text and JSON, with no screenshot or file representation")
-    func copiesLocator() throws {
-        let board = NSPasteboard.withUniqueName()
-        defer { board.releaseGlobally() }
-        board.setString("old clipboard", forType: .string)
-        let reference = try #require(WindowReference(window: referenceWindow(), primaryHeightInPoints: 900))
-        #expect(try PasteboardWindowReference.write(reference, to: board))
-        let text = try #require(board.string(forType: .string))
-        let json = try #require(board.string(forType: PasteboardWindowReference.referenceType))
-        #expect(text.contains("com.example.Editor") && text.contains("Report — Draft") && text.contains("Cowork"))
-        let decoded = try WindowReference.decode(json: json)
-        #expect(decoded.windowID == 42 && decoded.processID == 501)
-        #expect(board.data(forType: .png) == nil && board.data(forType: .tiff) == nil)
-        #expect(board.string(forType: .fileURL) == nil)
+    @Test("A floating badge above the document window is skipped (Feishu, 2026-11-13)")
+    func skipsFloatingBadge() {
+        // Window list Claude read from Feishu after a ⌘⌘ picked the 66×20 sharing button.
+        let windows = [
+            window(id: 125318, pid: 36399, title: "Window", frame: CGRect(x: 439, y: 114, width: 66, height: 20), stackingIndex: 0),
+            window(id: 125133, pid: 36399, title: "预览", frame: CGRect(x: 435, y: 110, width: 1182, height: 925), stackingIndex: 1),
+            window(id: 104991, pid: 36399, title: "飞书", frame: CGRect(x: 436, y: 245, width: 1262, height: 755), stackingIndex: 2),
+        ]
+        let chosen = WindowReference.frontWindow(in: windows, frontmostProcessID: 36399, ownBundleIdentifier: nil)
+        #expect(chosen?.id == 125133)
     }
 
-    private final class Delegate: SelectionOverlayDelegate {
-        var modeChanges = 0
-        var cancellations = 0
-        func overlayDidBeginDrag(at point: CGPoint) {}
-        func overlayDidDrag(to point: CGPoint, snapping: Bool) {}
-        func overlayDidHover(at point: CGPoint) {}
-        func overlayDidEndDrag(at point: CGPoint) {}
-        func overlayDidCancel() { cancellations += 1 }
-        func overlayDidRequestMode(_ requested: CaptureFlow?) { modeChanges += 1 }
+    @Test("An app whose only window is small still gets that window")
+    func smallOnlyWindow() {
+        let windows = [
+            window(id: 7, pid: 501, frame: CGRect(x: 0, y: 0, width: 160, height: 90)),
+            window(id: 8, pid: 700, bundle: "com.other.App"),
+        ]
+        let chosen = WindowReference.frontWindow(in: windows, frontmostProcessID: 501, ownBundleIdentifier: nil)
+        #expect(chosen?.id == 7)
     }
 
-    @Test("Reference picking keeps its purpose when R/S/Space/Tab are pressed, and Escape still cancels")
-    func locksPickerPurpose() throws {
-        let view = SelectionOverlayView(frame: CGRect(x: 0, y: 0, width: 900, height: 560))
-        let delegate = Delegate()
-        view.delegate = delegate
-        view.isWindowReference = true
-        for (key, code) in [("r", UInt16(15)), ("s", 1), (" ", 49), ("\t", 48), ("\u{1b}", 53)] {
-            let event = try #require(NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
-                context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: code
-            ))
-            view.keyDown(with: event)
-        }
-        #expect(delegate.modeChanges == 0 && delegate.cancellations == 1)
+    @Test("A front app with no window gives nothing rather than another app's window")
+    func noFallbackToOtherApps() {
+        let windows = [window(id: 1, pid: 700, bundle: "com.other.App")]
+        #expect(WindowReference.frontWindow(in: windows, frontmostProcessID: 501, ownBundleIdentifier: nil) == nil)
+    }
+
+    @Test("With TriCap in front, its own windows are skipped for the topmost other window")
+    func skipsTriCap() {
+        let windows = [
+            window(id: 1, pid: 900, bundle: "app.tricap.TriCap", stackingIndex: 0),
+            window(id: 2, pid: 501, stackingIndex: 1),
+        ]
+        let chosen = WindowReference.frontWindow(in: windows, frontmostProcessID: nil, ownBundleIdentifier: "app.tricap.TriCap")
+        #expect(chosen?.id == 2)
+    }
+
+    @Test("Windows without an app identity never produce a reference")
+    func rejectsMissingIdentity() {
+        #expect(WindowReference(window: WindowCandidate(id: 42, frame: CGRect(x: 0, y: 0, width: 100, height: 100))) == nil)
+        #expect(WindowReference(window: window(id: 0)) == nil)
+    }
+
+    @Test("The clipboard text is one line of JSON with the window identity and nothing else")
+    func clipboardIsBareJSON() throws {
+        let reference = try #require(WindowReference(window: window()))
+        #expect(try reference.json()
+            == #"{"app":"Editor","bundleId":"com.example.Editor","pid":501,"title":"Report — Draft","windowId":42}"#)
+        #expect(reference.displayName == "Report — Draft — Editor")
+    }
+
+    @Test("Invisible watermark characters are dropped from titles (Feishu in Chrome, 2026-11-13)")
+    func dropsInvisibleCharacters() throws {
+        let watermark = "\u{200C}\u{200D}\u{FEFF}\u{2062}\u{200D}\u{200B}\u{2061}\u{FEFF}\u{2064}\u{202C}\u{2060}"
+        let reference = try #require(WindowReference(window: window(title: watermark + "芯界光核-资产台账 - 飞书云文档")))
+        #expect(reference.windowTitle == "芯界光核-资产台账 - 飞书云文档")
+        #expect(!(try reference.json()).unicodeScalars.contains { $0.properties.generalCategory == .format })
+
+        let onlyInvisible = try #require(WindowReference(window: window(title: watermark)))
+        #expect(onlyInvisible.windowTitle == nil && onlyInvisible.displayName == "Editor")
+
+        let emoji = try #require(WindowReference(window: window(title: "⭐️ Notes")))
+        #expect(emoji.windowTitle == "⭐️ Notes")
+    }
+
+    @Test("Window titles are data: quotes, newlines and code fences stay inside the JSON string")
+    func titleIsEscapedData() throws {
+        let title = "报价 ' \"\n```sh\n$(printf unexpected)\n```"
+        let reference = try #require(WindowReference(window: window(title: title)))
+        let json = try reference.json()
+        #expect(!json.contains("```") && !json.contains("\n"))
+        let decoded = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(decoded["title"] as? String == title)
+    }
+
+    @Test("Settings saved by the earlier ⌥⇧6 build still load")
+    func ignoresRetiredShortcutSetting() throws {
+        let data = Data(#"{"hotKey":{"keyCode":17,"carbonModifiers":256},"windowReferenceHotKey":{"keyCode":22,"carbonModifiers":2560},"lastCaptureFlow":"recording"}"#.utf8)
+        let settings = try JSONDecoder().decode(AppSettings.self, from: data)
+        #expect(settings.hotKey.keyCode == 17 && settings.lastCaptureFlow == .recording)
+    }
+}
+
+@Suite("Several windows in one clipboard")
+struct WindowReferenceBatchTests {
+    private let start = Date(timeIntervalSince1970: 1_794_500_000)
+
+    private func reference(id: UInt32, pid: Int32 = 501, title: String = "Doc") throws -> WindowReference {
+        try #require(WindowReference(window: window(id: id, pid: pid, title: title)))
+    }
+
+    @Test("Presses within a minute, with nothing else copied, add one line per window")
+    func appendsLines() throws {
+        var batch = WindowReferenceBatch()
+        let outcome1 = batch.add(try reference(id: 1), at: start, changeCount: 10)
+        #expect(outcome1 == .started)
+        batch.didWrite(changeCount: 11)
+        let outcome2 = batch.add(try reference(id: 2, pid: 700), at: start.addingTimeInterval(30), changeCount: 11)
+        #expect(outcome2 == .appended)
+        batch.didWrite(changeCount: 12)
+        let lines = try batch.text().components(separatedBy: "\n")
+        #expect(lines.count == 2)
+        #expect(lines[0].hasPrefix("{") && lines[0].contains(#""windowId":1"#))
+        #expect(lines[1].hasSuffix("}") && lines[1].contains(#""windowId":2"#))
+    }
+
+    @Test("A late press, or anything copied in between, starts a fresh clipboard")
+    func startsOver() throws {
+        var late = WindowReferenceBatch()
+        late.add(try reference(id: 1), at: start, changeCount: 10)
+        late.didWrite(changeCount: 11)
+        let afterLimit = start.addingTimeInterval(WindowReferenceBatch.continuationWindow + 1)
+        let outcome3 = late.add(try reference(id: 2), at: afterLimit, changeCount: 11)
+        #expect(outcome3 == .started)
+        #expect(late.references.map(\.windowID) == [2])
+
+        var copiedElsewhere = WindowReferenceBatch()
+        copiedElsewhere.add(try reference(id: 1), at: start, changeCount: 10)
+        copiedElsewhere.didWrite(changeCount: 11)
+        let outcome4 = copiedElsewhere.add(try reference(id: 2), at: start.addingTimeInterval(5), changeCount: 12)
+        #expect(outcome4 == .started)
+        #expect(copiedElsewhere.references.map(\.windowID) == [2])
+    }
+
+    @Test("Referencing the same window again keeps one line and refreshes its title")
+    func deduplicates() throws {
+        var batch = WindowReferenceBatch()
+        batch.add(try reference(id: 1), at: start, changeCount: 10)
+        batch.didWrite(changeCount: 11)
+        batch.add(try reference(id: 2, pid: 700), at: start.addingTimeInterval(5), changeCount: 11)
+        batch.didWrite(changeCount: 12)
+        let outcome5 = batch.add(try reference(id: 1, title: "Doc — Saved"), at: start.addingTimeInterval(9), changeCount: 12)
+        #expect(outcome5 == .alreadyIncluded)
+        #expect(batch.references.map(\.windowID) == [1, 2])
+        #expect(batch.references.first?.windowTitle == "Doc — Saved")
     }
 }

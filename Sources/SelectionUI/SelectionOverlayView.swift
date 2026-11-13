@@ -39,11 +39,6 @@ public final class SelectionOverlayView: NSView {
         didSet { if oldValue != mode { needsDisplay = true } }
     }
 
-    /// A dedicated whole-window picker, with no content subregions or recording shortcuts.
-    public var isWindowReference = false {
-        didSet { if oldValue != isWindowReference { needsDisplay = true } }
-    }
-
     /// What is under the pointer, in AppKit global points — a window, or a rectangle read off the
     /// screen content. Drawn as a highlight while the user has not started dragging: one click
     /// captures exactly this rectangle.
@@ -138,11 +133,9 @@ public final class SelectionOverlayView: NSView {
         drawCorners(of: local, in: context)
 
         if let pixelSize = highlightedWindowPixelSize {
-            let action = isWindowReference
-                ? "click to copy window locator"
-                : "click to capture \(highlightIsVisualRegion ? "content" : "window")"
+            let what = highlightIsVisualRegion ? "content" : "window"
             drawBadge(
-                "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px  ·  \(action)",
+                "\(Int(pixelSize.width)) × \(Int(pixelSize.height)) px  ·  click to capture \(what)",
                 near: local,
                 in: context
             )
@@ -150,7 +143,6 @@ public final class SelectionOverlayView: NSView {
     }
 
     private var accentColor: NSColor {
-        if isWindowReference { return .systemBlue }
         switch mode {
         case .quickStill: return .systemGreen
         case .editStill: return .controlAccentColor
@@ -162,10 +154,8 @@ public final class SelectionOverlayView: NSView {
     /// The hint names what `R` cycles *to*, so the three-state cycle explains itself one press
     /// ahead instead of demanding a mental map.
     private func drawModeBanner(in context: CGContext) {
-        let title = isWindowReference ? "Reference a window" : mode.displayName
-        let hint = isWindowReference
-            ? "Click a window for Claude     Esc / right-click  cancel"
-            : "Click a window or drag     R  \(mode.next.displayName.lowercased())     Esc  cancel"
+        let title = mode.displayName
+        let hint = "Click a window or drag     R  \(mode.next.displayName.lowercased())     Esc  cancel"
 
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
@@ -353,7 +343,6 @@ public final class SelectionOverlayView: NSView {
             delegate?.overlayDidCancel()
             return
         }
-        guard !isWindowReference else { return }
         switch event.charactersIgnoringModifiers?.lowercased() {
         case "r", " ", "\t":
             // One key, three flows: R cycles quick screenshot → edit → recording.

@@ -28,8 +28,6 @@ public final class GlobalHotKeyMonitor {
         /// The user's configurable pin shortcut. Independent of `primaryCapture`, so one being
         /// unavailable never disables the other.
         case pinFromClipboard = 3
-        /// Dedicated window-reference command; does not change the capture shortcut's last flow.
-        case windowReference = 4
     }
 
     /// Four-character signature identifying TriCap's hot keys ('TRCP').

@@ -81,8 +81,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var hotKey: HotKeyCombo
     /// Pins whatever image is on the clipboard as a floating window.
     public var pinHotKey: HotKeyCombo
-    /// Pick a whole window and copy its application and window identity.
-    public var windowReferenceHotKey: HotKeyCombo
     /// What happens after a still capture succeeds.
     public var stillCaptureAction: StillCaptureAction
     /// What the capture hot key opens: a fixed mode, or whatever completed last.
@@ -131,7 +129,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public init(
         hotKey: HotKeyCombo = .default,
         pinHotKey: HotKeyCombo = .defaultPin,
-        windowReferenceHotKey: HotKeyCombo = .defaultWindowReference,
         stillCaptureAction: StillCaptureAction = .copyToClipboard,
         hotKeyLaunchMode: HotKeyLaunchMode = .rememberLast,
         lastCaptureIntent: CaptureIntent = .still,
@@ -157,7 +154,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
     ) {
         self.hotKey = hotKey
         self.pinHotKey = pinHotKey
-        self.windowReferenceHotKey = windowReferenceHotKey
         self.stillCaptureAction = stillCaptureAction
         self.hotKeyLaunchMode = hotKeyLaunchMode
         self.lastCaptureIntent = lastCaptureIntent
@@ -275,8 +271,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .hotKey) ?? fallback.hotKey
         // Absent in every blob written before pinning existed: fall back to the shipped F3.
         pinHotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .pinHotKey) ?? fallback.pinHotKey
-        windowReferenceHotKey = try c.decodeIfPresent(HotKeyCombo.self, forKey: .windowReferenceHotKey)
-            ?? fallback.windowReferenceHotKey
         stillCaptureAction = c.decodeTolerantly(StillCaptureAction.self, forKey: .stillCaptureAction)
             ?? fallback.stillCaptureAction
         hotKeyLaunchMode = c.decodeTolerantly(HotKeyLaunchMode.self, forKey: .hotKeyLaunchMode)

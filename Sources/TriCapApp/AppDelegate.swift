@@ -43,6 +43,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// session: the gate frees as soon as the clipboard is served, and these finish on their own.
     private let quickSaveQueue = BackgroundSaveQueue()
 
+    /// Consecutive ⌘⌘ presses within a minute add windows to one clipboard, one JSON line each.
+    private var referenceBatch = WindowReferenceBatch()
+
     /// The single gate every capture entry point goes through. It stays occupied for the whole
     /// pipeline — selection, countdown, recording, teardown and the editor hand-off — so a second
     /// hot-key press or menu click while a recording is live is refused instead of overwriting the
@@ -60,7 +63,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         registerHotKey()
         registerPinHotKey()
-        registerWindowReferenceHotKey()
+        DoubleCommandMonitor.shared.onTrigger = { [weak self] in self?.referenceFrontWindow() }
+        DoubleCommandMonitor.shared.start()
         pinboard.onCountChanged = { [weak self] in self?.refreshMenu() }
 
         store.onChange = { [weak self] previous, current in
@@ -72,10 +76,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if previous.pinHotKey != current.pinHotKey {
                 self.registerPinHotKey(previous: previous.pinHotKey)
-                handled = true
-            }
-            if previous.windowReferenceHotKey != current.windowReferenceHotKey {
-                self.registerWindowReferenceHotKey(previous: previous.windowReferenceHotKey)
                 handled = true
             }
             if !handled { self.refreshMenu() }
@@ -103,6 +103,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
+    /// Input Monitoring may have been switched on while TriCap was running; pick it up here.
+    public func applicationDidBecomeActive(_ notification: Notification) {
+        guard !DoubleCommandMonitor.shared.isRunning, DoubleCommandMonitor.shared.start() else { return }
+        refreshMenu()
+    }
 
     // MARK: - Menu bar
 
@@ -181,15 +187,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             captureAndEdit.target = self
             captureAndEdit.image = NSImage(systemSymbolName: "pencil.tip.crop.circle", accessibilityDescription: nil)
             menu.addItem(captureAndEdit)
+        }
 
-            let reference = NSMenuItem(
-                title: "Reference a Window…",
-                action: #selector(referenceWindow),
+        menu.addItem(.separator())
+
+        let reference = NSMenuItem(
+            title: "Copy Front Window for Claude",
+            action: #selector(referenceFrontWindowFromMenu),
+            keyEquivalent: ""
+        )
+        reference.target = self
+        reference.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
+        menu.addItem(reference)
+
+        if !DoubleCommandMonitor.shared.isRunning {
+            let enable = NSMenuItem(
+                title: "Turn On ⌘⌘ Shortcut…",
+                action: #selector(enableDoubleCommand),
                 keyEquivalent: ""
             )
-            reference.target = self
-            reference.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
-            menu.addItem(reference)
+            enable.target = self
+            menu.addItem(enable)
         }
 
         menu.addItem(.separator())
@@ -214,19 +232,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let windowShortcut = DoubleCommandMonitor.shared.isRunning ? "      Window  ⌘⌘" : ""
         let shortcut = NSMenuItem(
-            title: "Screenshot  \(store.settings.hotKey.displayString)      Pin  \(store.settings.pinHotKey.displayString)",
+            title: "Screenshot  \(store.settings.hotKey.displayString)      Pin  \(store.settings.pinHotKey.displayString)\(windowShortcut)",
             action: nil,
             keyEquivalent: ""
         )
         shortcut.isEnabled = false
         menu.addItem(shortcut)
-        let referenceShortcut = NSMenuItem(
-            title: "Window reference  \(store.settings.windowReferenceHotKey.displayString)",
-            action: nil, keyEquivalent: ""
-        )
-        referenceShortcut.isEnabled = false
-        menu.addItem(referenceShortcut)
 
         let reveal = NSMenuItem(
             title: "Open Save Folder",
@@ -335,34 +348,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
-    private func registerWindowReferenceHotKey(
-        previous: HotKeyCombo? = GlobalHotKeyMonitor.shared.combo(in: .windowReference)
-    ) {
-        let desired = store.settings.windowReferenceHotKey
-        let outcome = HotKeyRegistrationPolicy.apply(desired: desired, previous: previous) { combo in
-            GlobalHotKeyMonitor.shared.register(combo, in: .windowReference) { [weak self] in
-                Task { @MainActor in self?.referenceWindow() }
-            }
-        }
-        if outcome.rolledBack, let active = outcome.active {
-            isRollingBackHotKey = true
-            store.settings.windowReferenceHotKey = active
-            isRollingBackHotKey = false
-            presentAlert(
-                title: "Window reference shortcut unavailable",
-                message: "\(desired.displayString) is already in use, so TriCap kept \(active.displayString). Pick a different shortcut in Settings."
-            )
-        } else if outcome.lostShortcut {
-            presentAlert(
-                title: "Window reference shortcut unavailable",
-                message: "TriCap could not claim \(desired.displayString). Use “Reference a Window…” in the menu, or pick a different shortcut in Settings."
-            )
-        }
-        refreshMenu()
-    }
-
-    @objc private func referenceWindow() { beginCapture(mode: .quickStill, purpose: .windowReference) }
-
     @objc private func captureRegion() {
         // "Capture Region" keeps its historical meaning: the still flow the setting names.
         beginCapture(mode: CaptureFlow(legacyIntent: .still, stillAction: store.settings.stillCaptureAction))
@@ -463,7 +448,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let hosting = NSHostingController(
-            rootView: SettingsView(store: store, onShowWelcome: { [weak self] in self?.showWelcome() })
+            rootView: SettingsView(
+                store: store,
+                onShowWelcome: { [weak self] in self?.showWelcome() },
+                onEnableDoubleCommand: { [weak self] in self?.enableDoubleCommand() }
+            )
         )
         let window = NSWindow(contentViewController: hosting)
         window.title = "TriCap Settings"
@@ -505,7 +494,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func beginCapture(mode: CaptureFlow, purpose: RegionSelector.Purpose = .capture) {
+    private func beginCapture(mode: CaptureFlow) {
         guard gate.tryBegin() else { return }
         toast.dismiss()
         refreshMenu()
@@ -520,45 +509,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard await ensurePermission() else { return }
 
+            // Snapshot the window list *and* the screen pixels before the overlay covers
+            // everything: a click can then capture the window under the pointer, or the rectangle
+            // the content itself makes obvious — the image canvas inside a viewer, a document
+            // page. Sampling after the overlay appeared would detect TriCap's own dimming layer.
+            //
+            // The two reads are concurrent because each is a ScreenCaptureKit round trip and
+            // doing them in series is time the user spends staring at an un-dimmed screen.
+            let displays = DisplaySurvey.currentDisplays()
+            async let windowList = WindowSurvey.currentWindows()
+            async let pixelFields = ScreenPixelSurvey.currentFields(displays: displays)
+            let (windows, fields) = await (windowList, pixelFields)
+
             let selector = RegionSelector()
             self.selector = selector
-            let outcome: RegionSelector.Outcome
-            if purpose == .windowReference {
-                let windows = await WindowSurvey.currentWindows()
-                guard !WindowPicker.selectableWindows(
-                    in: windows, ownBundleIdentifier: Bundle.main.bundleIdentifier
-                ).isEmpty else {
-                    toast.showNotice("No available windows. Open a window and try again.", systemImage: "macwindow", isWarning: true)
-                    return
-                }
-                let escapeToken = SharedEscapeKey.claim.push(priority: .selection) { [weak selector] in
-                    selector?.cancel()
-                }
-                outcome = await selector.selectRegion(
-                    initialMode: .quickStill, windowCandidates: windows, purpose: .windowReference
-                )
-                SharedEscapeKey.claim.pop(escapeToken)
-            } else {
-                // Read windows and pixels concurrently before the overlay covers the desktop.
-                // Content detection then runs while the picker is already accepting input.
-                let displays = DisplaySurvey.currentDisplays()
-                async let windowList = WindowSurvey.currentWindows()
-                async let pixelFields = ScreenPixelSurvey.currentFields(displays: displays)
-                let (windows, fields) = await (windowList, pixelFields)
-                // Detection runs while the overlay is already accepting input.
-                outcome = await selector.selectRegion(
-                    initialMode: mode,
-                    windowCandidates: windows,
-                    visualRegions: { await ScreenPixelSurvey.detectedRegions(in: fields) }
-                )
-            }
+            // Detection itself is deliberately *not* awaited here: it runs while the overlay is
+            // already up and taking mouse events, and its results are adopted when they land.
+            let outcome = await selector.selectRegion(
+                initialMode: mode,
+                windowCandidates: windows,
+                visualRegions: { await ScreenPixelSurvey.detectedRegions(in: fields) }
+            )
             self.selector = nil
 
             switch outcome {
             case .cancelled:
                 TriCapLog.app.info("capture cancelled at selection")
-            case .windowSelected(let window):
-                await copyWindowReference(window)
             case .selected(let region, .quickStill):
                 rememberCompletedCaptureFlow(.quickStill)
                 gate.transition(to: .capturingStill)
@@ -571,39 +547,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 rememberCompletedCaptureFlow(.recording)
                 await recordClip(region: region)
             }
-        }
-    }
-
-    private func copyWindowReference(_ window: WindowCandidate) async {
-        guard let height = NSScreen.screens.first?.frame.height,
-              let reference = WindowReference(window: window, primaryHeightInPoints: height) else {
-            toast.showNotice("Could not identify this window's application. Pick another window.", systemImage: "exclamationmark.triangle", isWarning: true)
-            return
-        }
-        // An app may close or replace a window while the picker is open. Recheck its identity
-        // before copying; never hand Cowork a different window with a similar title.
-        let clipboardChangeCount = NSPasteboard.general.changeCount
-        let currentWindows = await WindowSurvey.currentWindows()
-        guard case .matched(let current) = reference.resolve(
-            in: currentWindows,
-            processLaunchDate: NSRunningApplication(processIdentifier: reference.processID)?.launchDate
-        ), let currentReference = WindowReference(window: current, primaryHeightInPoints: height) else {
-            toast.showNotice("This window is no longer available. Pick it again.", systemImage: "exclamationmark.triangle", isWarning: true)
-            return
-        }
-        guard NSPasteboard.general.changeCount == clipboardChangeCount else {
-            toast.showNotice("Newer clipboard content was kept. Pick the window again to copy its locator.", systemImage: "exclamationmark.triangle", isWarning: true)
-            return
-        }
-        do {
-            let copied = try PasteboardWindowReference.write(currentReference)
-            toast.showNotice(
-                copied ? "Copied window locator — paste in Claude." : "Could not copy the window locator. Try again.",
-                systemImage: copied ? "link" : "exclamationmark.triangle",
-                isWarning: !copied
-            )
-        } catch {
-            toast.showNotice("Could not prepare the window locator. Try again.", systemImage: "exclamationmark.triangle", isWarning: true)
         }
     }
 
@@ -922,6 +865,59 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
+    }
+
+    // MARK: - Window reference for Claude
+
+    @objc private func referenceFrontWindowFromMenu() { referenceFrontWindow() }
+
+    /// Command-Command: copy the front window's identity for Claude, with no picker and no click.
+    private func referenceFrontWindow() {
+        // Read the front app before anything can activate TriCap. Opening TriCap's own menu does
+        // not, so the menu command sees the same front app as the gesture.
+        let front = NSWorkspace.shared.frontmostApplication
+        let frontPID = front?.bundleIdentifier == Bundle.main.bundleIdentifier ? nil : front?.processIdentifier
+
+        Task { @MainActor in
+            // Window titles come from ScreenCaptureKit, which needs Screen Recording.
+            guard await ensurePermission() else { return }
+            let windows = await WindowSurvey.currentWindows()
+            guard let window = WindowReference.frontWindow(
+                in: windows, frontmostProcessID: frontPID, ownBundleIdentifier: Bundle.main.bundleIdentifier
+            ), let reference = WindowReference(window: window) else {
+                toast.showNotice("No window in front. Click a window, then press ⌘ twice.", systemImage: "macwindow", isWarning: true)
+                return
+            }
+            let pasteboard = NSPasteboard.general
+            let outcome = referenceBatch.add(reference, at: Date(), changeCount: pasteboard.changeCount)
+            pasteboard.clearContents()
+            if let text = try? referenceBatch.text(), pasteboard.setString(text, forType: .string) {
+                referenceBatch.didWrite(changeCount: pasteboard.changeCount)
+                let count = referenceBatch.references.count
+                let message = switch outcome {
+                case .started: "Copied “\(reference.displayName)” — paste in Claude."
+                case .appended: "Added “\(reference.displayName)” — \(count) windows copied, paste in Claude."
+                case .alreadyIncluded: "“\(reference.displayName)” is already copied — \(count) windows, paste in Claude."
+                }
+                toast.showNotice(message, systemImage: "link", isWarning: false)
+            } else {
+                toast.showNotice("Could not copy the window. Try again.", systemImage: "exclamationmark.triangle", isWarning: true)
+            }
+        }
+    }
+
+    @objc private func enableDoubleCommand() {
+        DoubleCommandMonitor.requestAccess()
+        if DoubleCommandMonitor.shared.start() {
+            refreshMenu()
+            toast.showNotice("⌘⌘ is on — press ⌘ twice to copy the front window.", systemImage: "link", isWarning: false)
+            return
+        }
+        presentAlert(
+            title: "Allow Input Monitoring for ⌘⌘",
+            message: "Turn on TriCap under System Settings → Privacy & Security → Input Monitoring. If ⌘⌘ still does nothing, quit and reopen TriCap.\n\nTriCap only notices that ⌘ was pressed twice. It never reads what you type."
+        )
+        DoubleCommandMonitor.openSystemSettings()
     }
 
     private func presentAlert(title: String, message: String) {

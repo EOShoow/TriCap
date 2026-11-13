@@ -22,19 +22,12 @@ enum SelectionOverlayPlacement {
 @MainActor
 public final class RegionSelector {
 
-    public enum Purpose: Sendable {
-        case capture
-        case windowReference
-    }
-
     /// The picker's mode vocabulary is ``CaptureFlow`` itself — quick screenshot, screenshot to
     /// the editor, or a recording. The flow lives in the overlay (cycled with `R`, `S` jumps to
     /// the edit flow) rather than in a pre-selection dialog, so one hot key reaches all three
     /// without an extra click.
     public enum Outcome: Sendable {
         case selected(CaptureRegion, CaptureFlow)
-        /// Preserve window identity rather than reducing it to a rectangle on one display.
-        case windowSelected(WindowCandidate)
         case cancelled
     }
 
@@ -43,7 +36,6 @@ public final class RegionSelector {
     private var displays: [DisplayGeometry] = []
 
     private var mode: CaptureFlow = .quickStill
-    private var purpose: Purpose = .capture
     private var anchor: CGPoint?
     private var gesture: SelectionGesture?
 
@@ -76,9 +68,6 @@ public final class RegionSelector {
 
     public init() {}
 
-    /// Also used by the app's shared Escape claim when a pin already owns the global key.
-    public func cancel() { finish(.cancelled) }
-
     /// Present the picker and wait for the user to choose a region or cancel.
     /// - Parameters:
     ///   - windowCandidates: selectable windows, front to back. Empty disables
@@ -91,15 +80,12 @@ public final class RegionSelector {
     public func selectRegion(
         initialMode: CaptureFlow,
         windowCandidates: [WindowCandidate] = [],
-        purpose: Purpose = .capture,
         visualRegions: (@Sendable () async -> [VisualRegionCandidate])? = nil
     ) async -> Outcome {
         let displays = DisplaySurvey.currentDisplays()
         guard !displays.isEmpty else { return .cancelled }
         self.displays = displays
         self.mode = initialMode
-        self.purpose = purpose
-        self.highlighted = nil
         // One filtered list feeds both hit-testing and snapping, so they can never disagree about
         // what counts as a window.
         let ownBundle = Bundle.main.bundleIdentifier
@@ -115,9 +101,8 @@ public final class RegionSelector {
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
             presentOverlays()
-            updateHighlight(at: NSEvent.mouseLocation)
 
-            guard purpose == .capture, let detectRegions = visualRegions else { return }
+            guard let detectRegions = visualRegions else { return }
             Task { @MainActor [weak self] in
                 let detected = await detectRegions()
                 self?.install(visualRegions: detected)
@@ -178,7 +163,6 @@ public final class RegionSelector {
             view.autoresizingMask = [.width, .height]
             view.delegate = self
             view.mode = mode
-            view.isWindowReference = purpose == .windowReference
             window.contentView = view
 
             windows.append(window)
@@ -212,10 +196,8 @@ public final class RegionSelector {
         self.continuation = nil
         dismissOverlays()
 
-        if purpose == .windowReference {
-            // Reference selection should return to the original app, ready for Paste.
-            previouslyActiveApp?.activate()
-        } else if case .cancelled = outcome {
+        if case .cancelled = outcome {
+            // Hand focus back so a cancelled capture is invisible to the user's workflow.
             previouslyActiveApp?.activate()
         }
         previouslyActiveApp = nil
@@ -253,10 +235,6 @@ extension RegionSelector: SelectionOverlayDelegate {
     }
 
     func overlayDidBeginDrag(at point: CGPoint) {
-        if purpose == .windowReference {
-            updateHighlight(at: point)
-            return
-        }
         anchor = point
         gesture = SelectionGesture(origin: point)
         // Keep the highlight up: until the pointer passes the drag threshold this is still a click.
@@ -264,10 +242,6 @@ extension RegionSelector: SelectionOverlayDelegate {
     }
 
     func overlayDidDrag(to point: CGPoint, snapping: Bool) {
-        if purpose == .windowReference {
-            updateHighlight(at: point)
-            return
-        }
         guard let anchor else { return }
         gesture?.update(to: point)
 
@@ -280,14 +254,6 @@ extension RegionSelector: SelectionOverlayDelegate {
     }
 
     func overlayDidEndDrag(at point: CGPoint) {
-        if purpose == .windowReference {
-            updateHighlight(at: point)
-            if case .window(let window) = highlighted {
-                finish(.windowSelected(window))
-            }
-            // Clicking empty desktop keeps the picker open; no zero-size capture or file.
-            return
-        }
         guard let anchor else {
             finish(.cancelled)
             return
@@ -337,7 +303,6 @@ extension RegionSelector: SelectionOverlayDelegate {
 
     /// `nil` advances the cycle (the `R` key); a concrete flow jumps straight to it (the `S` key).
     func overlayDidRequestMode(_ requested: CaptureFlow?) {
-        guard purpose == .capture else { return }
         mode = requested ?? mode.next
         applyMode()
     }
@@ -346,9 +311,7 @@ extension RegionSelector: SelectionOverlayDelegate {
 
     private func updateHighlight(at point: CGPoint) {
         let window = WindowPicker.window(at: point, in: candidates, ownBundleIdentifier: Bundle.main.bundleIdentifier)
-        let target = purpose == .windowReference
-            ? window.map(SelectionTarget.window)
-            : VisualRegionPicker.target(at: point, window: window, visualRegions: visualRegions)
+        let target = VisualRegionPicker.target(at: point, window: window, visualRegions: visualRegions)
         guard target?.identity != highlighted?.identity else { return }
         highlighted = target
 
@@ -356,9 +319,7 @@ extension RegionSelector: SelectionOverlayDelegate {
         if let frame = target?.frame,
            let display = DisplaySurvey.displayWithLargestOverlap(of: frame, in: displays),
            let region = CaptureRegion(appKitGlobalRect: frame, display: display) {
-            pixelSize = purpose == .windowReference
-                ? CGSize(width: frame.width * display.pointPixelScale, height: frame.height * display.pointPixelScale)
-                : region.nativePixelSize
+            pixelSize = region.nativePixelSize
         }
         for view in views {
             view.highlightedWindow = target?.frame

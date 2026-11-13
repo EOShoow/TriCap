@@ -18,21 +18,26 @@ struct SettingsView: View {
     @ObservedObject var loginItem: LoginItemController
     @ViewState private var hotKeyError: String?
     @ViewState private var pinHotKeyError: String?
-    @ViewState private var windowReferenceHotKeyError: String?
     @ViewState private var showAdvancedQuality: Bool
+    /// Bumped after "Turn On…" so the ⌘⌘ status row re-reads the monitor.
+    @ViewState private var doubleCommandCheck = 0
 
     /// Injected by the app so the About tab can reopen the welcome window.
     var onShowWelcome: (() -> Void)?
+    /// Injected by the app: asks for Input Monitoring and starts listening for ⌘⌘.
+    var onEnableDoubleCommand: (() -> Void)?
 
     init(
         store: SettingsStore,
         loginItem: LoginItemController = LoginItemController(),
         onShowWelcome: (() -> Void)? = nil,
+        onEnableDoubleCommand: (() -> Void)? = nil,
         initiallyExpandAdvancedQuality: Bool = false
     ) {
         self.store = store
         self.loginItem = loginItem
         self.onShowWelcome = onShowWelcome
+        self.onEnableDoubleCommand = onEnableDoubleCommand
         _showAdvancedQuality = State(initialValue: initiallyExpandAdvancedQuality)
     }
 
@@ -43,7 +48,9 @@ struct SettingsView: View {
             outputTab.tabItem { Label("Output", systemImage: "square.and.arrow.down") }
             aboutTab.tabItem { Label("About", systemImage: "info.circle") }
         }
-        // The grouped form scrolls when the shortcut explanations need more room.
+        // Tall enough that the General tab — two shortcuts, the post-screenshot action, the
+        // countdown, launch-at-login and the permission row — fits without scrolling. The Form
+        // still scrolls if a longer explanation wraps, but nothing important should need hunting.
         .frame(width: 540, height: 780)
     }
 
@@ -81,25 +88,6 @@ struct SettingsView: View {
 
             Section {
                 HStack {
-                    Text("Reference a window")
-                    Spacer()
-                    HotKeyRecorder(
-                        combo: $store.settings.windowReferenceHotKey,
-                        errorMessage: $windowReferenceHotKeyError
-                    )
-                }
-                if let windowReferenceHotKeyError {
-                    Text(windowReferenceHotKeyError).font(.caption).foregroundStyle(.red)
-                }
-                Text("Click a window to copy its app, title, process ID and macOS window ID for Claude. Paste the locator into your conversation. Claude needs computer-use tools to access the window. **Esc** cancels.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Window reference shortcut")
-            }
-
-            Section {
-                HStack {
                     Text("Pin")
                     Spacer()
                     HotKeyRecorder(
@@ -115,6 +103,12 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Pin shortcut")
+            }
+
+            Section {
+                windowReferenceRow
+            } header: {
+                Text("Window reference for Claude")
             }
 
             Section {
@@ -201,6 +195,28 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Login item error: \(error)")
             }
+        }
+    }
+
+    private var windowReferenceRow: some View {
+        let _ = doubleCommandCheck
+        let isOn = DoubleCommandMonitor.shared.isRunning
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                if isOn {
+                    Label("On — press ⌘ twice", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                } else {
+                    Label("⌘⌘ needs Input Monitoring", systemImage: "lock.shield").foregroundStyle(.orange)
+                    Spacer()
+                    Button("Turn On…") {
+                        onEnableDoubleCommand?()
+                        doubleCommandCheck += 1
+                    }
+                }
+            }
+            Text("Copies the front window's app, title and window ID. Press ⌘ twice in other windows within a minute to add them, one line each. Paste into Claude and add your request; Claude needs computer-use tools to open the window. “Copy Front Window for Claude” in the menu does the same without the permission. TriCap only notices that ⌘ was pressed twice — it never reads what you type.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

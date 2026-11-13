@@ -93,12 +93,6 @@ public struct HotKeyCombo: Codable, Equatable, Hashable, Sendable {
     /// and says so rather than quietly moving to another key. See `HotKeyRegistrationPolicy`.
     public static let defaultPin = HotKeyCombo(keyCode: 99, carbonModifiers: 0)  // kVK_F3
 
-    /// Copy a picked window's locator for an AI assistant: Option+Shift+6.
-    public static let defaultWindowReference = HotKeyCombo(
-        keyCode: 22,  // kVK_ANSI_6
-        carbonModifiers: CarbonModifier.option.rawValue | CarbonModifier.shift.rawValue
-    )
-
     /// Virtual-key → label for an ANSI layout.
     ///
     /// Deliberately a fixed table rather than a `UCKeyTranslate` round trip: the label is

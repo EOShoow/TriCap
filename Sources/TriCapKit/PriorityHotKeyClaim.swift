@@ -29,6 +29,8 @@ public final class PriorityHotKeyClaim {
 
         /// Dismissing a pinned image. Loses to a running recording.
         public static let pin = Priority(rawValue: 100)
+        /// Cancelling a window picker takes precedence over closing an existing pin.
+        public static let selection = Priority(rawValue: 500)
         /// Cancelling a countdown or a recording. Always wins while it is held.
         public static let recording = Priority(rawValue: 1000)
 

@@ -16,6 +16,9 @@ public struct WindowCandidate: Equatable, Sendable, Identifiable {
     public let isOnScreen: Bool
     public let bundleIdentifier: String?
     public let title: String?
+    public let applicationName: String?
+    /// Together with the window ID, identifies the running instance rather than a similarly named app.
+    public let processID: Int32?
     /// Front-to-back position as reported by the window server: 0 is frontmost.
     public let stackingIndex: Int
 
@@ -26,6 +29,8 @@ public struct WindowCandidate: Equatable, Sendable, Identifiable {
         isOnScreen: Bool = true,
         bundleIdentifier: String? = nil,
         title: String? = nil,
+        applicationName: String? = nil,
+        processID: Int32? = nil,
         stackingIndex: Int = 0
     ) {
         self.id = id
@@ -34,6 +39,8 @@ public struct WindowCandidate: Equatable, Sendable, Identifiable {
         self.isOnScreen = isOnScreen
         self.bundleIdentifier = bundleIdentifier
         self.title = title
+        self.applicationName = applicationName
+        self.processID = processID
         self.stackingIndex = stackingIndex
     }
 }

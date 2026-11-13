@@ -18,6 +18,7 @@ struct SettingsView: View {
     @ObservedObject var loginItem: LoginItemController
     @ViewState private var hotKeyError: String?
     @ViewState private var pinHotKeyError: String?
+    @ViewState private var windowReferenceHotKeyError: String?
     @ViewState private var showAdvancedQuality: Bool
 
     /// Injected by the app so the About tab can reopen the welcome window.
@@ -42,9 +43,7 @@ struct SettingsView: View {
             outputTab.tabItem { Label("Output", systemImage: "square.and.arrow.down") }
             aboutTab.tabItem { Label("About", systemImage: "info.circle") }
         }
-        // Tall enough that the General tab — two shortcuts, the post-screenshot action, the
-        // countdown, launch-at-login and the permission row — fits without scrolling. The Form
-        // still scrolls if a longer explanation wraps, but nothing important should need hunting.
+        // The grouped form scrolls when the shortcut explanations need more room.
         .frame(width: 540, height: 780)
     }
 
@@ -78,6 +77,25 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Capture shortcut")
+            }
+
+            Section {
+                HStack {
+                    Text("Reference a window")
+                    Spacer()
+                    HotKeyRecorder(
+                        combo: $store.settings.windowReferenceHotKey,
+                        errorMessage: $windowReferenceHotKeyError
+                    )
+                }
+                if let windowReferenceHotKeyError {
+                    Text(windowReferenceHotKeyError).font(.caption).foregroundStyle(.red)
+                }
+                Text("Click a window to copy its app, title, process ID and macOS window ID for Claude. Paste the locator into your conversation. Claude needs computer-use tools to access the window. **Esc** cancels.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Window reference shortcut")
             }
 
             Section {

@@ -32,6 +32,8 @@ happens on your Mac: no network code, no telemetry, no cloud sync, no account.
 - **Export** PNG, JPEG, static WebP, or Animated WebP.
 - **Copy a reference** to the clipboard: a *relative* Markdown/Obsidian image reference when the
   file lands inside your configured vault root, otherwise the absolute file path.
+- **Reference a Window…** (`⌥⇧6`) copies the selected window's application and live window
+  identity for Claude Desktop / Cowork. Paste it into your conversation to identify the target.
 - **After saving**, a confirmation tells you the file name, the folder, the size, and exactly what
   went on the clipboard — with a **Show in Finder** button.
 
@@ -109,7 +111,7 @@ TriCap has no Dock icon — look for the viewfinder icon in the menu bar.
 ./scripts/test.sh
 ```
 
-568 test cases. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
+579 test cases. The wrapper exists because SwiftPM does not put the Command Line Tools copy of
 `Testing.framework` on the search path unless Xcode is the active developer directory; the script
 adds the `-F` and `-rpath` flags that make `swift test` work with CLT only. With Xcode installed,
 plain `swift test` also works.
@@ -189,6 +191,19 @@ identity to avoid that. This repository does not sign, notarize or publish.
 5. Annotate. `⌘Z` / `⇧⌘Z` undo and redo. For a clip, drag the **Start**/**End** handles to trim
    and the **Frame** handle to scrub.
 6. **Save**. The file lands in your save folder and the reference goes to the clipboard.
+
+### 引用窗口给 Claude / Cowork
+
+按 **`⌥⇧6`**，或从菜单选择 **Reference a Window…**，再点选目标窗口。
+TriCap 将应用名、Bundle ID、PID、完整窗口标题、macOS CGWindowID 和当时位置复制为一段定位引用，
+回到原应用后可直接粘贴到 Claude 桌面版／Cowork。快捷键可在 Settings → General 修改。
+
+这个入口只选择完整窗口；`Esc` 或右键取消，点击空白桌面会继续等待选择。
+选中后会重新核对窗口身份，引用中也要求 Cowork 在操作前读取当前窗口，避免依赖过时坐标。
+引用独立于截图／录制模式，不改变截图快捷键记住的模式。
+
+此操作只复制本地定位信息；Claude 能否访问目标窗口，取决于其电脑使用功能和应用访问许可。
+TriCap 不会自动向 Claude 发送消息，也不会为此保存截图或调用外部模型。
 
 ### Pinning
 

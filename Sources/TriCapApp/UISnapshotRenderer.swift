@@ -186,6 +186,10 @@ enum UISnapshotRenderer {
             windowHighlightSnapshot(),
             to: directory.appendingPathComponent("14-selection-window-highlight.png")
         )
+        try write(
+            windowHighlightSnapshot(reference: true),
+            to: directory.appendingPathComponent("24-selection-window-reference.png")
+        )
         // The visual-region feature, end to end: the highlight rectangle in these two is not a
         // number typed into this file, it is whatever `VisualRegionDetector` found in the bitmap
         // beside it. If detection regresses, these images change or the render fails outright.
@@ -344,13 +348,14 @@ enum UISnapshotRenderer {
         return try composite(base: desktop, overlay: try bitmap(of: container, background: nil))
     }
 
-    private static func windowHighlightSnapshot() throws -> NSBitmapImageRep {
+    private static func windowHighlightSnapshot(reference: Bool = false) throws -> NSBitmapImageRep {
         let size = CGSize(width: 900, height: 560)
         let container = offscreenContainer(size: size)
         let desktop = syntheticDesktop(width: Int(size.width), height: Int(size.height))
 
         let overlay = SelectionOverlayView(frame: container.bounds)
         overlay.mode = .quickStill
+        overlay.isWindowReference = reference
         container.addSubview(overlay)
 
         // Same global-point convention as `selectionOverlaySnapshot`.

@@ -57,6 +57,8 @@ public enum WindowSurvey {
             isOnScreen: window.isOnScreen,
             bundleIdentifier: window.owningApplication?.bundleIdentifier,
             title: window.title,
+            applicationName: window.owningApplication?.applicationName,
+            processID: window.owningApplication?.processID,
             stackingIndex: stackingIndex
         )
     }
